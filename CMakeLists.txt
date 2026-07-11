@@ -11,30 +11,27 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets LinguistTools)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets LinguistTools)
-find_package(Qt6 REQUIRED COMPONENTS Widgets Bluetooth)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Bluetooth Concurrent)
 
 set(TS_FILES smartglasses_android_app_zh_CN.ts)
 
 set(PROJECT_SOURCES
-
-
-
-
         ${TS_FILES}
 )
 
 include_directories(./includes/)
 
+# 添加 whisper.cpp 子目录
+add_subdirectory(third_party/whisper.cpp-master)
+
+file(GLOB_RECURSE SRC_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+file(GLOB_RECURSE HEADER_FILES ${CMAKE_CURRENT_SOURCE_DIR}/includes/*.h)
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
     qt_add_executable(smartglasses_android_app
         MANUAL_FINALIZATION
         ${PROJECT_SOURCES}
-        includes/devicehandler.h
-        src/devicehandler.cpp
-        src/main.cpp src/mainwindow.cpp
-        includes/mainwindow.h
-        src/mainwindow.ui
-
+        ${SRC_FILES}
+        ${HEADER_FILES}
     )
 
 # Define target properties for Android with Qt 6 as:
@@ -61,7 +58,14 @@ endif()
 
 target_link_libraries(smartglasses_android_app PRIVATE
     Qt${QT_VERSION_MAJOR}::Widgets
-    Qt${QT_VERSION_MAJOR}::Bluetooth)
+    Qt${QT_VERSION_MAJOR}::Bluetooth
+    Qt${QT_VERSION_MAJOR}::Concurrent
+    whisper                              # 链接 whisper 库
+)
+
+target_include_directories(smartglasses_android_app PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/whisper.cpp/include   # 头文件路径
+)
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
 # If you are developing for iOS or macOS you should consider setting an
