@@ -6,6 +6,9 @@
 #include <QPermissions>
 #include <QTreeWidgetItem>
 #include <QHeaderView>
+#include <QFile>
+#include <QStandardPaths>
+#include <QDir>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -83,15 +86,23 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_serviceTree, &QTreeWidget::itemClicked, this, &MainWindow::onServiceTreeItemClicked);
 
     // ========== 新增：初始化 Whisper ==========
+    // 解压模型文件
+    m_modelPath = extractModelToFile();
+    if (!m_modelPath.isEmpty()) {
+        appendStatus("模型文件就绪: " + m_modelPath);
+    } else {
+        appendStatus("模型文件提取失败！");
+    }
+
     m_whisperManager = new WhisperManager(this);
     connect(m_whisperManager, &WhisperManager::transcriptionReady,
             this, &MainWindow::onTranscriptionResult);
     connect(m_whisperManager, &WhisperManager::errorOccurred,
             this, &MainWindow::onWhisperError);
 
-    QString modelPath = "/sdcard/ggml-base-q5_1.bin";
-    if (!m_whisperManager->init(modelPath)) {
-        appendStatus("Whisper 模型加载失败，请检查文件是否存在！");
+    //QString modelPath = "/storage/emulated/0/Download/ggml-base-q5_1.bin";
+    if (!m_whisperManager->init(m_modelPath)) {
+        appendStatus("Whisper 模型加载失败，请检查文件！");
     } else {
         appendStatus("Whisper 模型加载成功！");
     }
@@ -164,6 +175,8 @@ void MainWindow::requestAndroidPermissions()
     QApplication *app = qApp;
     if (!app) return;
     app->requestPermission(bluetoothPermission, this, &MainWindow::onBluetoothPermissionGranted);
+    // 存储权限独立请求（与蓝牙权限同时发起）
+    //requestManageExternalStorage();
 }
 
 void MainWindow::onServiceTreeItemClicked(QTreeWidgetItem *item, int column)
@@ -193,4 +206,57 @@ void MainWindow::onTranscriptionResult(const QString &text)
 void MainWindow::onWhisperError(const QString &error)
 {
     appendStatus("Whisper 错误: " + error);
+}
+
+
+void MainWindow::requestManageExternalStorage()
+{
+#ifdef Q_OS_ANDROID
+    if (QNativeInterface::QAndroidApplication::sdkVersion() >= 30) {  // Android 11+
+        QJniObject activity = QNativeInterface::QAndroidApplication::context();
+        QJniObject intent("android.content.Intent");
+        intent.callObjectMethod("setAction", "(Ljava/lang/String;)Landroid/content/Intent;",
+                                QJniObject::fromString("android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION").object());
+        intent.callObjectMethod("setData", "(Landroid/net/Uri;)Landroid/content/Intent;",
+                                QJniObject::callStaticObjectMethod("android.net.Uri", "parse",
+                                                                   "(Ljava/lang/String;)Landroid/net/Uri;",
+                                                                   QJniObject::fromString("package:" + QCoreApplication::applicationName()).object()).object());
+        activity.callMethod<void>("startActivity", "(Landroid/content/Intent;)V", intent.object());
+    }
+#endif
+}
+
+QString MainWindow::extractModelToFile()
+{
+    // 目标路径：应用私有目录
+    QString targetDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QDir().mkpath(targetDir);
+    QString targetPath = targetDir + "/model.bin";
+
+    // 如果已经解压过，直接返回
+    if (QFile::exists(targetPath)) {
+        qDebug() << "Model already extracted:" << targetPath;
+        return targetPath;
+    }
+
+    // 从 Qt 资源读取
+    QFile resFile(":/assets/models/ggml-base-q5_1.bin");
+    if (!resFile.open(QIODevice::ReadOnly)) {
+        qWarning() << "Cannot open resource file: /assets/model.bin";
+        return QString();
+    }
+
+    // 写入目标文件
+    QFile targetFile(targetPath);
+    if (!targetFile.open(QIODevice::WriteOnly)) {
+        qWarning() << "Cannot write to:" << targetPath;
+        return QString();
+    }
+
+    targetFile.write(resFile.readAll());
+    targetFile.close();
+    resFile.close();
+
+    qDebug() << "Model extracted to:" << targetPath;
+    return targetPath;
 }

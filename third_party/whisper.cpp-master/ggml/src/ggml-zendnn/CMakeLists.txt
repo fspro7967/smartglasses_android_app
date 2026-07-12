@@ -86,6 +86,6 @@ endif()
 
 target_link_libraries(ggml-zendnn PRIVATE m pthread)
 
-if (GGML_OPENMP)
+if (GGML_OPENMP_ENABLED)
     target_link_libraries(ggml-zendnn PRIVATE OpenMP::OpenMP_CXX)
 endif()

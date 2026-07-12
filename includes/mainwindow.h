@@ -7,7 +7,7 @@
 #include <QListWidget>
 #include <QTreeWidget>
 #include "devicehandler.h"
-#include "whisper_manager.h"   // ← 新增
+#include "whisper_manager.h"   //
 
 class MainWindow : public QMainWindow
 {
@@ -22,9 +22,8 @@ private slots:
     void onDataReceived(const QByteArray &data);
     void appendStatus(const QString &msg);
     void onBluetoothPermissionGranted();
-    //void onStoragePermissionGranted();
     void onServiceTreeItemClicked(QTreeWidgetItem *item, int column);
-
+    void requestManageExternalStorage();
     // ← 新增两个槽
     void onTranscriptionResult(const QString &text);
     void onWhisperError(const QString &error);
@@ -32,6 +31,8 @@ private slots:
 private:
     void requestAndroidPermissions();
     void buildServiceTree();
+    QString extractModelToFile();
+    QString m_modelPath;
 
     DeviceHandler *m_deviceHandler;
     QListWidget  *m_deviceList;

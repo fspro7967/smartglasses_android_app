@@ -39,6 +39,27 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         ${HEADER_FILES}
     )
 
+if(ANDROID)
+    # 设置assets目录
+    set(ASSETS_DIR ${CMAKE_SOURCE_DIR}/android/assets)
+
+    # 获取所有模型文件（用于依赖追踪）
+    file(GLOB_RECURSE MODEL_FILES ${ASSETS_DIR}/models/*)
+
+    # 创建自定义目标来复制assets
+    add_custom_target(copy_assets ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            ${CMAKE_BINARY_DIR}/android-build/assets/models
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${ASSETS_DIR}/models
+            ${CMAKE_BINARY_DIR}/android-build/assets/models
+        DEPENDS ${MODEL_FILES}
+        COMMENT "Copying assets to Android build directory"
+    )
+
+    # 让你的主目标依赖这个自定义目标
+    add_dependencies(smartglasses_android_app copy_assets)
+endif()
 # Define target properties for Android with Qt 6 as:
 #    set_property(TARGET smartglasses_android_app APPEND PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR
 #                 ${CMAKE_CURRENT_SOURCE_DIR}/android)
@@ -96,3 +117,4 @@ install(TARGETS smartglasses_android_app
 if(QT_VERSION_MAJOR EQUAL 6)
     qt_finalize_executable(smartglasses_android_app)
 endif()
+
