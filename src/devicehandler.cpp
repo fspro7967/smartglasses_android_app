@@ -185,7 +185,7 @@ void DeviceHandler::onServiceStateChanged(QLowEnergyService::ServiceState newSta
     if (!service)
         return;
 
-    if (newState == QLowEnergyService::ServiceDiscovered) {
+    if (newState == QLowEnergyService::RemoteServiceDiscovered) {
         const QList<QLowEnergyCharacteristic> chars = service->characteristics();
         for (const QLowEnergyCharacteristic &ch : chars) {
             QString name = ch.name().isEmpty() ? ch.uuid().toString() : ch.name();
@@ -197,8 +197,8 @@ void DeviceHandler::onServiceStateChanged(QLowEnergyService::ServiceState newSta
     }
 
     // 检查是否所有服务的详情都已发现
-    if (newState == QLowEnergyService::ServiceDiscovered ||
-        newState == QLowEnergyService::DiscoveryRequired) {
+    if (newState == QLowEnergyService::RemoteServiceDiscovered ||
+        newState == QLowEnergyService::RemoteService) {
         m_pendingServiceDetails--;
         if (m_pendingServiceDetails <= 0 && m_servicesDiscovered) {
             emit serviceDetailsDiscoveryFinished();

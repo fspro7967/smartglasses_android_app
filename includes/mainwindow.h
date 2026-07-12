@@ -22,6 +22,7 @@ private slots:
     void onDataReceived(const QByteArray &data);
     void appendStatus(const QString &msg);
     void onBluetoothPermissionGranted();
+    //void onStoragePermissionGranted();
     void onServiceTreeItemClicked(QTreeWidgetItem *item, int column);
 
     // ← 新增两个槽

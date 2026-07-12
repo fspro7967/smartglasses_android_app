@@ -23,6 +23,11 @@ include_directories(./includes/)
 
 # 添加 whisper.cpp 子目录
 add_subdirectory(third_party/whisper.cpp-master)
+# 禁用 OpenMP，避免依赖 libomp.so
+set(GGML_OPENMP OFF CACHE BOOL "Disable OpenMP for Android" FORCE)
+set(GGML_OPENMP OFF)
+
+#add_subdirectory(third_party/whisper.cpp-master)
 
 file(GLOB_RECURSE SRC_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 file(GLOB_RECURSE HEADER_FILES ${CMAKE_CURRENT_SOURCE_DIR}/includes/*.h)
