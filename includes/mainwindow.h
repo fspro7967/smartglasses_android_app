@@ -23,10 +23,9 @@ private slots:
     void appendStatus(const QString &msg);
     void onBluetoothPermissionGranted();
     void onServiceTreeItemClicked(QTreeWidgetItem *item, int column);
-    void requestManageExternalStorage();
-    // ← 新增两个槽
     void onTranscriptionResult(const QString &text);
     void onWhisperError(const QString &error);
+    void onSelectAudioFileClicked();
 
 private:
     void requestAndroidPermissions();
@@ -37,12 +36,13 @@ private:
     DeviceHandler *m_deviceHandler;
     QListWidget  *m_deviceList;
     QPushButton  *m_scanButton;
+    QPushButton  *m_selectAudioButton;
     QTextEdit    *m_dataDisplay;
+    QTextEdit    *m_transcriptionDisplay;
     QTreeWidget  *m_serviceTree;
 
     QList<QBluetoothDeviceInfo> m_discoveredDevices;
 
-    // ← 新增成员
     WhisperManager *m_whisperManager = nullptr;
     QByteArray m_audioBuffer;
 };

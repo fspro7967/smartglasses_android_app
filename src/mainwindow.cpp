@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QDateTime>
 #include <QDebug>
 #include <QApplication>
@@ -9,26 +10,39 @@
 #include <QFile>
 #include <QStandardPaths>
 #include <QDir>
+#include <QFileDialog>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_deviceHandler(new DeviceHandler(this))
     , m_deviceList(new QListWidget(this))
     , m_scanButton(new QPushButton("Start Scan", this))
+    , m_selectAudioButton(new QPushButton("Select Audio", this))
     , m_dataDisplay(new QTextEdit(this))
+    , m_transcriptionDisplay(new QTextEdit(this))
     , m_serviceTree(new QTreeWidget(this))
 {
     setWindowTitle("Bluetooth Hex Viewer");
 
     QWidget *centralWidget = new QWidget(this);
     QVBoxLayout *layout = new QVBoxLayout(centralWidget);
-    layout->addWidget(m_scanButton);
+    QHBoxLayout *buttonLayout = new QHBoxLayout();
+    buttonLayout->addWidget(m_scanButton);
+    buttonLayout->addWidget(m_selectAudioButton);
+    layout->addLayout(buttonLayout);
     layout->addWidget(m_deviceList);
     layout->addWidget(m_serviceTree);
+    layout->addWidget(m_transcriptionDisplay);
     layout->addWidget(m_dataDisplay);
     setCentralWidget(centralWidget);
 
     m_dataDisplay->setReadOnly(true);
+    m_transcriptionDisplay->setReadOnly(true);
+    m_transcriptionDisplay->setPlaceholderText("识别文字将显示在这里...");
+    QFont font = m_transcriptionDisplay->font();
+    font.setPointSize(14);
+    m_transcriptionDisplay->setFont(font);
+    m_transcriptionDisplay->setMaximumHeight(120);
     m_serviceTree->setHeaderLabels({"Service / Characteristic", "Properties"});
     m_serviceTree->header()->setStretchLastSection(true);
 
@@ -84,6 +98,7 @@ MainWindow::MainWindow(QWidget *parent)
             });
 
     connect(m_serviceTree, &QTreeWidget::itemClicked, this, &MainWindow::onServiceTreeItemClicked);
+    connect(m_selectAudioButton, &QPushButton::clicked, this, &MainWindow::onSelectAudioFileClicked);
 
     // ========== 新增：初始化 Whisper ==========
     // 解压模型文件
@@ -96,9 +111,9 @@ MainWindow::MainWindow(QWidget *parent)
 
     m_whisperManager = new WhisperManager(this);
     connect(m_whisperManager, &WhisperManager::transcriptionReady,
-            this, &MainWindow::onTranscriptionResult);
+            this, &MainWindow::onTranscriptionResult, Qt::QueuedConnection);
     connect(m_whisperManager, &WhisperManager::errorOccurred,
-            this, &MainWindow::onWhisperError);
+            this, &MainWindow::onWhisperError, Qt::QueuedConnection);
 
     //QString modelPath = "/storage/emulated/0/Download/ggml-base-q5_1.bin";
     if (!m_whisperManager->init(m_modelPath)) {
@@ -127,23 +142,26 @@ void MainWindow::onDeviceSelected(QListWidgetItem *item)
     }
 }
 
-// ========== 修改后的 onDataReceived ==========
 void MainWindow::onDataReceived(const QByteArray &data)
 {
     // 十六进制显示（调试用）
-    QString hexString;
+    /*QString hexString;
     for (int i = 0; i < data.size(); ++i) {
         hexString += QString("%1 ").arg((quint8)data.at(i), 2, 16, QLatin1Char('0')).toUpper();
     }
     QString timeStr = QDateTime::currentDateTime().toString("hh:mm:ss.zzz");
     m_dataDisplay->append(QString("[%1] %2").arg(timeStr, hexString.trimmed()));
-
-    // 新增：累积音频数据并喂给 Whisper
+    qInfo() << hexString;*/
+    // 把收到的数据存入缓存区
     m_audioBuffer.append(data);
-    const int CHUNK_SIZE_BYTES = 3 * 16000 * 2;  // 96000 字节
+    //appendStatus(QString("收到 BLE 数据 %1 字节，当前缓冲区 %2 字节").arg(data.size()).arg(m_audioBuffer.size()));
+    // 把缓存的数据传入模型，并清空缓存
+    constexpr int CHUNK_SIZE_BYTES = 3 * 16000 * sizeof(int16_t); // 约 3 秒的 16kHz/16bit 音频
     if (m_audioBuffer.size() >= CHUNK_SIZE_BYTES && m_whisperManager) {
         const int16_t *pcmData = reinterpret_cast<const int16_t*>(m_audioBuffer.constData());
-        size_t sampleCount = m_audioBuffer.size() / 2;
+        const size_t sampleCount = static_cast<size_t>(m_audioBuffer.size() / sizeof(int16_t));
+        //qDebug() << "Feed audio to Whisper:" << sampleCount << "samples from" << m_audioBuffer.size() << "bytes";
+        appendStatus(QString("已将 %1 字节音频送入 Whisper，样本数 %2").arg(m_audioBuffer.size()).arg(sampleCount));
         m_whisperManager->feedAudioData(pcmData, sampleCount);
         m_audioBuffer.clear();
     }
@@ -175,8 +193,6 @@ void MainWindow::requestAndroidPermissions()
     QApplication *app = qApp;
     if (!app) return;
     app->requestPermission(bluetoothPermission, this, &MainWindow::onBluetoothPermissionGranted);
-    // 存储权限独立请求（与蓝牙权限同时发起）
-    //requestManageExternalStorage();
 }
 
 void MainWindow::onServiceTreeItemClicked(QTreeWidgetItem *item, int column)
@@ -200,30 +216,13 @@ void MainWindow::onServiceTreeItemClicked(QTreeWidgetItem *item, int column)
 void MainWindow::onTranscriptionResult(const QString &text)
 {
     QString timeStr = QDateTime::currentDateTime().toString("hh:mm:ss.zzz");
-    m_dataDisplay->append(QString("[识别] %1").arg(text));
+    appendStatus(QString("Whisper 回调收到文本: %1").arg(text));
+    m_transcriptionDisplay->append(QString("[%1] %2").arg(timeStr, text));
 }
 
 void MainWindow::onWhisperError(const QString &error)
 {
     appendStatus("Whisper 错误: " + error);
-}
-
-
-void MainWindow::requestManageExternalStorage()
-{
-#ifdef Q_OS_ANDROID
-    if (QNativeInterface::QAndroidApplication::sdkVersion() >= 30) {  // Android 11+
-        QJniObject activity = QNativeInterface::QAndroidApplication::context();
-        QJniObject intent("android.content.Intent");
-        intent.callObjectMethod("setAction", "(Ljava/lang/String;)Landroid/content/Intent;",
-                                QJniObject::fromString("android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION").object());
-        intent.callObjectMethod("setData", "(Landroid/net/Uri;)Landroid/content/Intent;",
-                                QJniObject::callStaticObjectMethod("android.net.Uri", "parse",
-                                                                   "(Ljava/lang/String;)Landroid/net/Uri;",
-                                                                   QJniObject::fromString("package:" + QCoreApplication::applicationName()).object()).object());
-        activity.callMethod<void>("startActivity", "(Landroid/content/Intent;)V", intent.object());
-    }
-#endif
 }
 
 QString MainWindow::extractModelToFile()
@@ -240,7 +239,7 @@ QString MainWindow::extractModelToFile()
     }
 
     // 从 Qt 资源读取
-    QFile resFile(":/assets/models/ggml-base-q5_1.bin");
+    QFile resFile("assets:/models/model.bin");
     if (!resFile.open(QIODevice::ReadOnly)) {
         qWarning() << "Cannot open resource file: /assets/model.bin";
         return QString();
@@ -259,4 +258,22 @@ QString MainWindow::extractModelToFile()
 
     qDebug() << "Model extracted to:" << targetPath;
     return targetPath;
+}
+
+void MainWindow::onSelectAudioFileClicked()
+{
+    QString filePath = QFileDialog::getOpenFileName(this,
+                                                    tr("Select Audio File"),
+                                                    QStandardPaths::writableLocation(QStandardPaths::DownloadLocation),
+                                                    tr("Audio Files (*.wav *.pcm);;All Files (*)"));
+    if (!filePath.isEmpty()) {
+        appendStatus("选择音频文件: " + filePath);
+        
+        if (m_whisperManager) {
+            m_whisperManager->processAudioFile(filePath);
+            appendStatus("已将音频文件送入模型识别");
+        } else {
+            appendStatus("模型未初始化");
+        }
+    }
 }

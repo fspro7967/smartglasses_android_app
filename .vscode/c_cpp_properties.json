@@ -4,7 +4,8 @@
             "name": "Linux",
             "includePath": [
                 "${workspaceFolder}/**",
-                "/opt/Qt/**"
+                "/opt/Qt/**",
+                "/data/SmartGlasses/smartglasses_android_app/**"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/clang",

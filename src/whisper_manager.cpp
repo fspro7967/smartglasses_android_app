@@ -3,6 +3,7 @@
 #include <QDebug>
 #include <QtConcurrent>
 #include <algorithm>
+#include <QFile>
 
 WhisperManager::WhisperManager(QObject *parent)
     : QObject(parent)
@@ -33,14 +34,26 @@ bool WhisperManager::init(const QString &modelPath)
 
 void WhisperManager::feedAudioData(const int16_t *data, size_t sampleCount)
 {
-    for (size_t i = 0; i < sampleCount; ++i) {
-        m_audioBuffer.push_back(data[i] / 32768.0f);
+    std::vector<float> m_audioBuffer_1 ;
+    if (!data || sampleCount == 0) {
+        emit errorOccurred("未收到有效音频样本");
+        return;
     }
 
-    if (m_audioBuffer.size() >= CHUNK_SIZE && !m_isProcessing) {
+    for (size_t i = 0; i < sampleCount; ++i) {
+        m_audioBuffer_1.push_back(static_cast<float>(data[i]) / 32768.0f);
+    }
+
+    qDebug() << "WhisperManager::feedAudioData sampleCount=" << sampleCount
+             << "bufferSize=" << m_audioBuffer_1.size();
+    emit errorOccurred(QString("已接收 %1 个音频样本，当前缓存 %2 个样本").arg(sampleCount).arg(m_audioBuffer_1.size()));
+
+    if (m_audioBuffer_1.size() >= CHUNK_SIZE && !m_isProcessing) {
         m_isProcessing = true;
 
-        auto audioChunk = std::move(m_audioBuffer);
+        auto audioChunk = std::move(m_audioBuffer_1);
+        m_audioBuffer_1.clear();
+        qDebug() << "Start Whisper processing with" << audioChunk.size() << "samples";
 
         QFuture<void> future = QtConcurrent::run([this, audioChunk = std::move(audioChunk)]() {
             processBuffer(audioChunk);
@@ -57,14 +70,18 @@ void WhisperManager::feedAudioData(const int16_t *data, size_t sampleCount)
 void WhisperManager::processBuffer(const std::vector<float> &audioChunk)
 {
     if (!m_ctx || audioChunk.empty()) {
+        emit errorOccurred("Whisper 收到空音频或模型未初始化");
         m_isProcessing = false;
         return;
     }
 
+    qDebug() << "Whisper processBuffer samples=" << audioChunk.size();
+
     struct whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     params.n_threads = 4;
-    params.language = "auto";        // 改为自动检测，支持中英混合
+    params.language = "auto";
 
+    qDebug() << "Calling whisper_full with" << audioChunk.size() << "samples";
     int result = whisper_full(m_ctx, params, audioChunk.data(), audioChunk.size());
     if (result != 0) {
         emit errorOccurred("转录失败，错误码: " + QString::number(result));
@@ -74,6 +91,7 @@ void WhisperManager::processBuffer(const std::vector<float> &audioChunk)
 
     QString fullText;
     int n_segments = whisper_full_n_segments(m_ctx);
+    qDebug() << "Whisper segments=" << n_segments;
     for (int i = 0; i < n_segments; ++i) {
         const char *text = whisper_full_get_segment_text(m_ctx, i);
         if (text) {
@@ -81,11 +99,64 @@ void WhisperManager::processBuffer(const std::vector<float> &audioChunk)
         }
     }
 
+    qDebug() << "Whisper result text=" << fullText << "segments=" << n_segments;
     if (!fullText.isEmpty()) {
         emit transcriptionReady(fullText);
+    } else {
+        emit errorOccurred("Whisper 未识别到有效文本");
+        emit transcriptionReady("[无识别结果]");
     }
 
     m_isProcessing = false;
+}
+
+void WhisperManager::processAudioFile(const QString &filePath)
+{
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        emit errorOccurred("无法打开音频文件: " + filePath);
+        return;
+    }
+
+    QByteArray data = file.readAll();
+    file.close();
+
+    if (data.isEmpty()) {
+        emit errorOccurred("音频文件为空");
+        return;
+    }
+
+    std::vector<float> audioBuffer;
+    const int16_t *pcmData = reinterpret_cast<const int16_t*>(data.constData());
+    size_t sampleCount = static_cast<size_t>(data.size() / sizeof(int16_t));
+
+    for (size_t i = 0; i < sampleCount; ++i) {
+        audioBuffer.push_back(static_cast<float>(pcmData[i]) / 32768.0f);
+    }
+
+    qDebug() << "WhisperManager::processAudioFile sampleCount=" << sampleCount;
+
+    if (audioBuffer.empty()) {
+        emit errorOccurred("没有有效音频数据");
+        return;
+    }
+
+    if (m_isProcessing) {
+        emit errorOccurred("正在处理中，请稍后");
+        return;
+    }
+
+    m_isProcessing = true;
+
+    QFuture<void> future = QtConcurrent::run([this, audioBuffer]() {
+        processBuffer(audioBuffer);
+    });
+    m_futures.append(future);
+
+    m_futures.erase(
+        std::remove_if(m_futures.begin(), m_futures.end(),
+                       [](QFuture<void> &f) { return f.isFinished(); }),
+        m_futures.end());
 }
 
 void WhisperManager::reset()

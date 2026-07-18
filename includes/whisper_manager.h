@@ -16,6 +16,7 @@ public:
 
     bool init(const QString &modelPath);
     void feedAudioData(const int16_t *data, size_t sampleCount);
+    void processAudioFile(const QString &filePath);
     void reset();
 
 signals:
@@ -30,7 +31,7 @@ private:
     bool m_isProcessing = false;
     QList<QFuture<void>> m_futures;
 
-    static constexpr size_t CHUNK_SIZE = 3 * 16000;  // 3 秒 @16kHz
+    static constexpr size_t CHUNK_SIZE = 16000;
 };
 
 #endif // WHISPER_MANAGER_H

@@ -8,10 +8,12 @@ set(CMAKE_AUTORCC ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets LinguistTools)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets LinguistTools)
+#set(CMAKE_PREFIX_PATH "/opt/Qt/6.11.1/android_arm64_v8a/")
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
+#find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Bluetooth Concurrent)
+find_package(Qt6LinguistTools QUIET)
+find_package(Qt5LinguistTools QUIET)
 
 set(TS_FILES smartglasses_android_app_zh_CN.ts)
 
@@ -39,47 +41,30 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         ${HEADER_FILES}
     )
 
-if(ANDROID)
-    # 设置assets目录
-    set(ASSETS_DIR ${CMAKE_SOURCE_DIR}/android/assets)
-
-    # 获取所有模型文件（用于依赖追踪）
-    file(GLOB_RECURSE MODEL_FILES ${ASSETS_DIR}/models/*)
-
-    # 创建自定义目标来复制assets
-    add_custom_target(copy_assets ALL
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-            ${CMAKE_BINARY_DIR}/android-build/assets/models
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${ASSETS_DIR}/models
-            ${CMAKE_BINARY_DIR}/android-build/assets/models
-        DEPENDS ${MODEL_FILES}
-        COMMENT "Copying assets to Android build directory"
-    )
-
-    # 让你的主目标依赖这个自定义目标
-    add_dependencies(smartglasses_android_app copy_assets)
-endif()
 # Define target properties for Android with Qt 6 as:
-#    set_property(TARGET smartglasses_android_app APPEND PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR
-#                 ${CMAKE_CURRENT_SOURCE_DIR}/android)
+    set_property(TARGET smartglasses_android_app APPEND PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR
+                 ${CMAKE_CURRENT_SOURCE_DIR}/android)
 # For more information, see https://doc.qt.io/qt-6/qt-add-executable.html#target-creation
 
-    qt_create_translation(QM_FILES ${CMAKE_SOURCE_DIR} ${TS_FILES})
+    if(Qt6LinguistTools_FOUND)
+        qt_create_translation(QM_FILES ${CMAKE_SOURCE_DIR} ${TS_FILES})
+    endif()
 else()
     if(ANDROID)
         add_library(smartglasses_android_app SHARED
             ${PROJECT_SOURCES}
         )
 # Define properties for Android with Qt 5 after find_package() calls as:
-#    set(ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android")
+    set(ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android")
     else()
         add_executable(smartglasses_android_app
             ${PROJECT_SOURCES}
         )
     endif()
 
-    qt5_create_translation(QM_FILES ${CMAKE_SOURCE_DIR} ${TS_FILES})
+    if(Qt5LinguistTools_FOUND)
+        qt5_create_translation(QM_FILES ${CMAKE_SOURCE_DIR} ${TS_FILES})
+    endif()
 endif()
 
 target_link_libraries(smartglasses_android_app PRIVATE
