@@ -105,7 +105,7 @@ endif()
 
 if (ANDROID)
     # 开启 Release 高度优化
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -ffast-math")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
 
     # 强制为 ARM64 启用 FP16 和 DotProduct 指令集支持
     if (${ANDROID_ABI} STREQUAL "arm64-v8a")

@@ -79,16 +79,33 @@ void WhisperManager::processBuffer(const std::vector<float> &audioChunk)
 
     struct whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     params.n_threads = 4;
-    params.language = "auto";
+    //params.language = "auto";
+    params.print_realtime = true;
+    params.print_progress = false;
+    params.print_timestamps = true;
+    params.print_special = false;
+    params.translate = false;
+    params.language = "en";
+    params.offset_ms = 0;
+    params.no_context = true;
+    params.single_segment = false;
+    //排除空白token
+    params.suppress_blank = true;
+    params.suppress_nst = true;
+    //解码与置信度阈值，防止幻觉
+    params.temperature = 0.0f;
+    params.temperature_inc = 0.2f;
+    params.entropy_thold = 2.4f;
+    params.logprob_thold = -1.0f;
     setpriority(PRIO_PROCESS, 0, -10);
     qDebug() << "Calling whisper_full with" << audioChunk.size() << "samples";
     //int result = whisper_full(m_ctx, params, audioChunk.data(), audioChunk.size());
     //qDebug() << "whisper_full returned"  ;
-    float *data = const_cast<float*>(audioChunk.data());
-    int size = audioChunk.size();
+    //float *data = const_cast<float*>(audioChunk.data());
+    //int size = audioChunk.size();
     qDebug() << "Whisper Data ready" ;
     qDebug() << "Whisper transcription began" ;
-     if (whisper_full(m_ctx, params, data, size) != 0) {
+     if (whisper_full(m_ctx, params, const_cast<float*>(audioChunk.data()), audioChunk.size()) != 0) {
         //emit errorOccurred("转录失败，错误码: " + QString::number(result));
         emit errorOccurred("Whisper 转录失败");
         m_isProcessing = false;
