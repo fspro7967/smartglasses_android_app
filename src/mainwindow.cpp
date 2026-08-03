@@ -100,7 +100,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_serviceTree, &QTreeWidget::itemClicked, this, &MainWindow::onServiceTreeItemClicked);
     connect(m_selectAudioButton, &QPushButton::clicked, this, &MainWindow::onSelectAudioFileClicked);
 
-    // ========== 新增：初始化 Whisper ==========
+    // 初始化 Whisper 
     // 解压模型文件
     m_modelPath = extractModelToFile();
     if (!m_modelPath.isEmpty()) {
@@ -115,7 +115,6 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_whisperManager, &WhisperManager::errorOccurred,
             this, &MainWindow::onWhisperError, Qt::QueuedConnection);
 
-    //QString modelPath = "/storage/emulated/0/Download/ggml-base-q5_1.bin";
     if (!m_whisperManager->init(m_modelPath)) {
         appendStatus("Whisper 模型加载失败，请检查文件！");
     } else {
@@ -152,9 +151,11 @@ void MainWindow::onDataReceived(const QByteArray &data)
     QString timeStr = QDateTime::currentDateTime().toString("hh:mm:ss.zzz");
     m_dataDisplay->append(QString("[%1] %2").arg(timeStr, hexString.trimmed()));
     qInfo() << hexString;*/
+
     // 把收到的数据存入缓存区
     m_audioBuffer.append(data);
     //appendStatus(QString("收到 BLE 数据 %1 字节，当前缓冲区 %2 字节").arg(data.size()).arg(m_audioBuffer.size()));
+
     // 把缓存的数据传入模型，并清空缓存
     constexpr int CHUNK_SIZE_BYTES = 3 * 16000 * sizeof(int16_t); // 约 3 秒的 16kHz/16bit 音频
     if (m_audioBuffer.size() >= CHUNK_SIZE_BYTES && m_whisperManager) {
@@ -212,7 +213,7 @@ void MainWindow::onServiceTreeItemClicked(QTreeWidgetItem *item, int column)
     }
 }
 
-// ========== 新增：Whisper 结果回调 ==========
+// Whisper 结果回调
 void MainWindow::onTranscriptionResult(const QString &text)
 {
     QString timeStr = QDateTime::currentDateTime().toString("hh:mm:ss.zzz");

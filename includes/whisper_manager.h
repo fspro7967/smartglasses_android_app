@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QFuture>
 #include <vector>
+#include <sys/resource.h>
 
 struct whisper_context;
 

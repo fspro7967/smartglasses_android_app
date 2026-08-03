@@ -24,7 +24,7 @@ set(PROJECT_SOURCES
 include_directories(./includes/)
 
 # 添加 whisper.cpp 子目录
-add_subdirectory(third_party/whisper.cpp-master)
+add_subdirectory(third_party/whisper.cpp)
 # 禁用 OpenMP，避免依赖 libomp.so
 set(GGML_OPENMP OFF CACHE BOOL "Disable OpenMP for Android" FORCE)
 set(GGML_OPENMP OFF)
@@ -103,3 +103,13 @@ if(QT_VERSION_MAJOR EQUAL 6)
     qt_finalize_executable(smartglasses_android_app)
 endif()
 
+if (ANDROID)
+    # 开启 Release 高度优化
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -ffast-math")
+
+    # 强制为 ARM64 启用 FP16 和 DotProduct 指令集支持
+    if (${ANDROID_ABI} STREQUAL "arm64-v8a")
+        add_compile_options(-march=armv8.2-a+fp16+dotprod)
+        add_definitions(-DGGML_USE_NEON)
+    endif()
+endif()

@@ -80,13 +80,23 @@ void WhisperManager::processBuffer(const std::vector<float> &audioChunk)
     struct whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     params.n_threads = 4;
     params.language = "auto";
-
+    setpriority(PRIO_PROCESS, 0, -10);
     qDebug() << "Calling whisper_full with" << audioChunk.size() << "samples";
-    int result = whisper_full(m_ctx, params, audioChunk.data(), audioChunk.size());
-    if (result != 0) {
-        emit errorOccurred("转录失败，错误码: " + QString::number(result));
+    //int result = whisper_full(m_ctx, params, audioChunk.data(), audioChunk.size());
+    //qDebug() << "whisper_full returned"  ;
+    float *data = const_cast<float*>(audioChunk.data());
+    int size = audioChunk.size();
+    qDebug() << "Whisper Data ready" ;
+    qDebug() << "Whisper transcription began" ;
+     if (whisper_full(m_ctx, params, data, size) != 0) {
+        //emit errorOccurred("转录失败，错误码: " + QString::number(result));
+        emit errorOccurred("Whisper 转录失败");
         m_isProcessing = false;
         return;
+    }
+    else{
+        qDebug() << "Whisper transcription completed successfully" ;
+        whisper_print_timings(m_ctx);
     }
 
     QString fullText;
