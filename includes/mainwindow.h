@@ -7,7 +7,8 @@
 #include <QListWidget>
 #include <QTreeWidget>
 #include "devicehandler.h"
-#include "whisper_manager.h"   //
+#include "whisper_manager.h"   
+#include "msgsender.h"
 
 class MainWindow : public QMainWindow
 {
@@ -24,8 +25,10 @@ private slots:
     void onBluetoothPermissionGranted();
     void onServiceTreeItemClicked(QTreeWidgetItem *item, int column);
     void onTranscriptionResult(const QString &text);
+    void onAIResponse(const QString &response);
     void onWhisperError(const QString &error);
     void onSelectAudioFileClicked();
+    void sendMessageToServer(const QString &message);
 
 private:
     void requestAndroidPermissions();
@@ -34,6 +37,7 @@ private:
     QString m_modelPath;
 
     DeviceHandler *m_deviceHandler;
+    MsgSender *m_msgsender;
     QListWidget  *m_deviceList;
     QPushButton  *m_scanButton;
     QPushButton  *m_selectAudioButton;

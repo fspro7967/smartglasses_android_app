@@ -11,7 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 #set(CMAKE_PREFIX_PATH "/opt/Qt/6.11.1/android_arm64_v8a/")
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
 #find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
-find_package(Qt6 REQUIRED COMPONENTS Widgets Bluetooth Concurrent)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Bluetooth Concurrent Network)
 find_package(Qt6LinguistTools QUIET)
 find_package(Qt5LinguistTools QUIET)
 
@@ -71,12 +71,28 @@ target_link_libraries(smartglasses_android_app PRIVATE
     Qt${QT_VERSION_MAJOR}::Widgets
     Qt${QT_VERSION_MAJOR}::Bluetooth
     Qt${QT_VERSION_MAJOR}::Concurrent
+    Qt${QT_VERSION_MAJOR}::Network
     whisper                              # 链接 whisper 库
 )
 
 target_include_directories(smartglasses_android_app PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/whisper.cpp/include   # 头文件路径
 )
+
+# ==================== Android OpenSSL（TLS/HTTPS 支持） ====================
+# Qt for Android 不依赖系统 TLS，必须将 OpenSSL 库随 APK 一起打包，
+# 否则 QNetworkAccessManager 请求 https 时会报 TLS 初始化错误。
+if (ANDROID)
+    include(FetchContent)
+    FetchContent_Declare(
+        android_openssl
+        DOWNLOAD_EXTRACT_TIMESTAMP true
+        URL https://github.com/KDAB/android_openssl/archive/refs/heads/master.zip
+    )
+    FetchContent_MakeAvailable(android_openssl)
+    include(${android_openssl_SOURCE_DIR}/android_openssl.cmake)
+    add_android_openssl_libraries(smartglasses_android_app)
+endif()
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
 # If you are developing for iOS or macOS you should consider setting an

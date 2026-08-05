@@ -7,6 +7,7 @@ The APP is written with Qt in C++, so you need to install Qt Creator(Recommended
     Tips: When build in the release mode, use the "android_release.keystore" file in the project as the singature file, whose password is "smartglasses".
 
 ## Todo
-- Upload the ASR results to our AI model and get its response.
+- Upload the ASR results to our AI model and get its response via Tailscale API
 - Send the AI response to the bluetooth device.
 - (Maybe)Integrate a simple model on mobile phone to anwser some simple questions when offline, and improve the responding speed.
+- Improve the GUI, rebuild the app with QML

@@ -46,7 +46,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_serviceTree->setHeaderLabels({"Service / Characteristic", "Properties"});
     m_serviceTree->header()->setStretchLastSection(true);
 
-    // 原有信号连接
+    // 信号连接
     connect(m_scanButton, &QPushButton::clicked, this, &MainWindow::onScanClicked);
     connect(m_deviceList, &QListWidget::itemClicked, this, &MainWindow::onDeviceSelected);
     connect(m_deviceHandler, &DeviceHandler::dataReceived, this, &MainWindow::onDataReceived);
@@ -120,7 +120,11 @@ MainWindow::MainWindow(QWidget *parent)
     } else {
         appendStatus("Whisper 模型加载成功！");
     }
-
+    // 初始化网络服务（AI 大模型调用）
+    m_msgsender = new MsgSender(this);
+    connect(m_msgsender, &MsgSender::responseReceived, this, &MainWindow::onAIResponse);
+    connect(m_msgsender, &MsgSender::errorOccurred, this,
+            [this](const QString &err) { appendStatus("AI API 错误: " + err); });
     requestAndroidPermissions();
 }
 
@@ -219,6 +223,20 @@ void MainWindow::onTranscriptionResult(const QString &text)
     QString timeStr = QDateTime::currentDateTime().toString("hh:mm:ss.zzz");
     appendStatus(QString("Whisper 回调收到文本: %1").arg(text));
     m_transcriptionDisplay->append(QString("[%1] %2").arg(timeStr, text));
+
+    // 将识别结果发送至 AI 大模型（过滤空结果占位符）
+    if (!text.isEmpty() && text != "[无识别结果]" && m_msgsender) {
+        m_msgsender->sendMessage(text);
+        appendStatus("已将识别文本发送至 AI 大模型");
+    }
+}
+
+// AI 大模型回复回调
+void MainWindow::onAIResponse(const QString &response)
+{
+    QString timeStr = QDateTime::currentDateTime().toString("hh:mm:ss.zzz");
+    appendStatus(QString("AI 回复: %1").arg(response));
+    m_transcriptionDisplay->append(QString("[%1] [AI] %2").arg(timeStr, response));
 }
 
 void MainWindow::onWhisperError(const QString &error)
@@ -276,5 +294,15 @@ void MainWindow::onSelectAudioFileClicked()
         } else {
             appendStatus("模型未初始化");
         }
+    }
+}
+
+void MainWindow::sendMessageToServer(const QString &message)
+{
+    if (m_msgsender) {
+        m_msgsender->sendMessage(message);
+        appendStatus("已发送至 AI 大模型: " + message);
+    } else {
+        appendStatus("消息发送器未初始化");
     }
 }
