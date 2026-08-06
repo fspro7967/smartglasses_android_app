@@ -1,54 +1,78 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
-#include <QMainWindow>
-#include <QTextEdit>
-#include <QPushButton>
-#include <QListWidget>
-#include <QTreeWidget>
+#include <QObject>
+#include <QBluetoothDeviceInfo>
+#include <QList>
+#include <QByteArray>
 #include "devicehandler.h"
-#include "whisper_manager.h"   
+#include "whisper_manager.h"
 #include "msgsender.h"
 
-class MainWindow : public QMainWindow
+// MainWindow 作为 QML 后端桥接类：所有 UI 交互由 QML 调用，
+// 业务逻辑（蓝牙、Whisper 识别、AI 对话）通过信号暴露给 QML。
+class MainWindow : public QObject
 {
     Q_OBJECT
+    Q_PROPERTY(bool scanning READ isScanning NOTIFY scanningChanged)
+    Q_PROPERTY(bool connected READ isConnected NOTIFY connectionChanged)
+    Q_PROPERTY(QString deviceName READ deviceName NOTIFY connectionChanged)
+    // 服务/特征树模型：每项为 { type, serviceUuid, label, chars: [{ serviceUuid, charUuid, charName, props, notifiable }] }
+    Q_PROPERTY(QVariantList services READ services NOTIFY servicesChanged)
+
 public:
-    explicit MainWindow(QWidget *parent = nullptr);
-    ~MainWindow();
+    explicit MainWindow(QObject *parent = nullptr);
+    ~MainWindow() override;
+
+    bool isScanning() const { return m_isScanning; }
+    bool isConnected() const { return m_isConnected; }
+    QString deviceName() const { return m_deviceName; }
+    QVariantList services() const { return m_services; }
+
+    Q_INVOKABLE void startScan();
+    Q_INVOKABLE void connectToDevice(int index);
+    Q_INVOKABLE void disconnectDevice();
+    Q_INVOKABLE void enableNotification(const QString &serviceUuid, const QString &charUuid);
+    Q_INVOKABLE void processAudioFile(const QString &filePath);
+    Q_INVOKABLE void sendMessageToServer(const QString &message);
+
+signals:
+    void deviceDiscovered(const QString &name);                       // 发现新设备
+    void statusMessage(const QString &msg);                           // 状态/日志消息
+    void servicesChanged();                                           // 服务/特征模型已更新
+    void transcriptionReady(const QString &text);                     // Whisper 识别结果
+    void aiResponseReady(const QString &response);                    // AI 大模型回复
+    void scanningChanged();
+    void connectionChanged();
 
 private slots:
-    void onScanClicked();
-    void onDeviceSelected(QListWidgetItem *item);
     void onDataReceived(const QByteArray &data);
-    void appendStatus(const QString &msg);
-    void onBluetoothPermissionGranted();
-    void onServiceTreeItemClicked(QTreeWidgetItem *item, int column);
+    void onServiceDiscovered(const QString &serviceUuid);
+    void onCharacteristicDiscovered(const QString &serviceUuid,
+                                    const QString &charUuid,
+                                    const QString &charName,
+                                    int properties);
     void onTranscriptionResult(const QString &text);
     void onAIResponse(const QString &response);
     void onWhisperError(const QString &error);
-    void onSelectAudioFileClicked();
-    void sendMessageToServer(const QString &message);
+    void onBluetoothPermissionGranted();
 
 private:
     void requestAndroidPermissions();
-    void buildServiceTree();
+    void clearServices();
     QString extractModelToFile();
-    QString m_modelPath;
 
     DeviceHandler *m_deviceHandler;
     MsgSender *m_msgsender;
-    QListWidget  *m_deviceList;
-    QPushButton  *m_scanButton;
-    QPushButton  *m_selectAudioButton;
-    QTextEdit    *m_dataDisplay;
-    QTextEdit    *m_transcriptionDisplay;
-    QTreeWidget  *m_serviceTree;
-
-    QList<QBluetoothDeviceInfo> m_discoveredDevices;
-
     WhisperManager *m_whisperManager = nullptr;
+    QList<QBluetoothDeviceInfo> m_discoveredDevices;
+    QVariantList m_services;            // 服务/特征树数据（暴露给 QML）
     QByteArray m_audioBuffer;
+    QString m_modelPath;
+    bool m_isScanning = false;
+    bool m_isConnected = false;
+    QString m_deviceName;
+    QString m_pendingDeviceName; // 正在连接中的设备名（连接成功时使用）
 };
 
 #endif // MAINWINDOW_H

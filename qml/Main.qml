@@ -1,0 +1,480 @@
+import QtQuick
+import QtQuick.Controls.Basic
+import QtQuick.Layouts
+import QtQuick.Dialogs
+
+ApplicationWindow {
+    id: root
+    visible: true
+    width: 420
+    height: 820
+    minimumWidth: 360
+    minimumHeight: 600
+    title: qsTr("智能眼镜助手")
+    color: cBg
+
+    // ==================== 主题色 ====================
+    readonly property color cAccent: "#4F8CFF"
+    readonly property color cBg: "#0B0E14"
+    readonly property color cCard: "#151A24"
+    readonly property color cBorder: "#232B3A"
+    readonly property color cText: "#EDF0F5"
+    readonly property color cSubText: "#8B93A5"
+    readonly property color cGreen: "#34C77B"
+    readonly property color cYellow: "#E5B93C"
+    readonly property color cRed: "#E5484D"
+
+    // ==================== 数据模型 ====================
+    ListModel { id: deviceModel }
+    ListModel { id: logModel }
+
+    property string transcript: ""
+    property string aiReply: ""
+    // 当前选中的设备索引（ListView.currentIndex 点击不会自动更新，需显式维护）
+    property int selectedDeviceIndex: -1
+    // 指定设备是否处于已连接状态
+    function isDeviceConnected(index) {
+        return backend.connected && index === root.selectedDeviceIndex
+    }
+
+    // 选择音频文件并送入 Whisper 识别
+    FileDialog {
+        id: audioDialog
+        title: qsTr("选择音频文件")
+        nameFilters: [qsTr("音频文件 (*.wav *.pcm)"), qsTr("所有文件 (*)")]
+        onAccepted: backend.processAudioFile(selectedFile.toString().replace(/^file:\/\//, ""))
+    }
+
+    // ==================== 后端信号 -> QML ====================
+    Connections {
+        target: backend
+
+        function onDeviceDiscovered(name) {
+            deviceModel.append({ name: name })
+        }
+
+        function onStatusMessage(msg) {
+            logModel.append({ text: msg, level: msg.includes("错误") || msg.includes("失败") ? "error" : "info" })
+            trimLog()
+        }
+
+        function onTranscriptionReady(text) {
+            root.transcript = text
+            logModel.append({ text: "[识别] " + text, level: "transcript" })
+            trimLog()
+        }
+
+        function onAiResponseReady(text) {
+            root.aiReply = text
+            logModel.append({ text: "[AI] " + text, level: "ai" })
+            trimLog()
+        }
+    }
+
+    function trimLog() {
+        if (logModel.count > 300)
+            logModel.remove(0, logModel.count - 300)
+        logView.positionViewAtEnd()
+    }
+
+    // ==================== 顶部工具栏 ====================
+    header: ToolBar {
+        height: 56
+        background: Rectangle { color: cCard; border.color: cBorder; border.width: 1 }
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 16
+            anchors.rightMargin: 8
+            spacing: 8
+
+            ColumnLayout {
+                spacing: 1
+                Layout.fillWidth: true
+                Text {
+                    text: qsTr("智能眼镜助手")
+                    color: cText
+                    font.pixelSize: 17
+                    font.bold: true
+                }
+                Text {
+                    text: root.connectionStatusText
+                    color: root.connectionStatusColor
+                    font.pixelSize: 12
+                }
+            }
+
+            Button {
+                text: backend.scanning ? qsTr("扫描中...") : qsTr("扫描设备")
+                enabled: !backend.scanning
+                onClicked: {
+                    deviceModel.clear()
+                    root.selectedDeviceIndex = -1
+                    backend.startScan()
+                }
+                contentItem: Text {
+                    text: parent.text
+                    color: parent.enabled ? "#FFFFFF" : cSubText
+                    font.pixelSize: 13
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    radius: 8
+                    color: parent.enabled ? cAccent : "#33405A"
+                }
+                implicitHeight: 36
+                implicitWidth: 88
+            }
+
+            Button {
+                text: qsTr("选音频")
+                onClicked: audioDialog.open()
+                contentItem: Text {
+                    text: parent.text
+                    color: cText
+                    font.pixelSize: 13
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    radius: 8
+                    color: cBorder
+                }
+                implicitHeight: 36
+                implicitWidth: 76
+            }
+        }
+    }
+
+    // ==================== 主内容 ====================
+    ColumnLayout {
+        anchors.fill: parent
+        anchors.margins: 12
+        spacing: 10
+
+        // ---- 设备列表 ----
+        Rectangle {
+            visible: deviceModel.count > 0
+            Layout.fillWidth: true
+            Layout.preferredHeight: Math.min(150, 44 + deviceModel.count * 44)
+            radius: 12
+            color: cCard
+            border.color: cBorder
+
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 0
+                Text {
+                    text: qsTr("附近设备 (%1)").arg(deviceModel.count)
+                    color: cSubText
+                    font.pixelSize: 12
+                    leftPadding: 12
+                    topPadding: 8
+                    bottomPadding: 4
+                }
+                ListView {
+                    id: deviceView
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    model: deviceModel
+                    delegate: ItemDelegate {
+                        width: ListView.view.width
+                        height: 40
+                        onClicked: {
+                            if (backend.connected && index === root.selectedDeviceIndex) {
+                                backend.disconnectDevice()
+                            } else {
+                                root.selectedDeviceIndex = index
+                                backend.connectToDevice(index)
+                            }
+                        }
+                        contentItem: RowLayout {
+                            spacing: 8
+                            Rectangle {
+                                implicitWidth: 8; implicitHeight: 8; radius: 4
+                                color: root.isDeviceConnected(index) ? cGreen : cSubText
+                            }
+                            Text {
+                                text: model.name
+                                color: cText
+                                font.pixelSize: 14
+                                elide: Text.ElideMiddle
+                                Layout.fillWidth: true
+                            }
+                            Text {
+                                text: root.isDeviceConnected(index) ? qsTr("断开") : qsTr("连接")
+                                color: root.isDeviceConnected(index) ? cGreen : cAccent
+                                font.pixelSize: 12
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- 服务/特征列表（数据由 C++ 端 backend.services 提供） ----
+        Rectangle {
+            visible: backend.services.length > 0
+            Layout.fillWidth: true
+            Layout.preferredHeight: servicesExpanded
+                ? serviceHeaderH + Math.min(serviceContent.contentHeight, 200)
+                : serviceHeaderH
+            radius: 12
+            color: cCard
+            border.color: cBorder
+
+            readonly property int serviceHeaderH: 36
+
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 0
+
+                // 标题行（点击展开/折叠）
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: parent.serviceHeaderH
+                    color: "transparent"
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: servicesExpanded = !servicesExpanded
+                    }
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 8
+                        Text {
+                            text: qsTr("蓝牙服务 (%1)").arg(backend.services.length)
+                            color: cSubText
+                            font.pixelSize: 12
+                            Layout.fillWidth: true
+                        }
+                        Text {
+                            text: servicesExpanded ? "▾" : "▸"
+                            color: cSubText
+                            font.pixelSize: 12
+                        }
+                    }
+                }
+
+                ListView {
+                    id: serviceContent
+                    visible: servicesExpanded
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Math.min(contentHeight, 200)
+                    clip: true
+                    model: backend.services
+                    delegate: Column {
+                        width: ListView.view.width
+                        spacing: 2
+
+                        // 服务行
+                        RowLayout {
+                            width: parent.width
+                            height: 28
+                            spacing: 6
+                            Rectangle {
+                                implicitWidth: 8; implicitHeight: 8; radius: 4
+                                color: cAccent
+                            }
+                            Text {
+                                text: qsTr("服务")
+                                color: cAccent
+                                font.pixelSize: 11
+                            }
+                            Text {
+                                text: modelData.label
+                                color: cText
+                                font.pixelSize: 11
+                                elide: Text.ElideMiddle
+                                Layout.fillWidth: true
+                            }
+                        }
+
+                        // 特征行
+                        Repeater {
+                            model: modelData.chars
+                            delegate: Rectangle {
+                                width: parent.width
+                                height: 44
+                                color: mouse.containsMouse ? "#1E2532" : "transparent"
+                                radius: 8
+                                MouseArea {
+                                    id: mouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    onClicked: {
+                                        if (modelData.notifiable)
+                                            backend.enableNotification(modelData.serviceUuid, modelData.charUuid)
+                                    }
+                                }
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 24
+                                    anchors.rightMargin: 8
+                                    spacing: 8
+                                    ColumnLayout {
+                                        spacing: 2
+                                        Layout.fillWidth: true
+                                        Text {
+                                            text: modelData.charName.length > 0 ? modelData.charName : modelData.charUuid
+                                            color: cText
+                                            font.pixelSize: 13
+                                            elide: Text.ElideMiddle
+                                            Layout.fillWidth: true
+                                        }
+                                        Text {
+                                            text: modelData.charUuid + "  " + modelData.props
+                                            color: cSubText
+                                            font.pixelSize: 10
+                                            elide: Text.ElideMiddle
+                                            Layout.fillWidth: true
+                                        }
+                                    }
+                                    Text {
+                                        visible: modelData.notifiable
+                                        text: qsTr("启用通知")
+                                        color: cAccent
+                                        font.pixelSize: 11
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- 识别与 AI 回复（主显示区） ----
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            radius: 12
+            color: cCard
+            border.color: cBorder
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 14
+                spacing: 10
+
+                // 语音识别字幕
+                ColumnLayout {
+                    spacing: 6
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    Text {
+                        text: qsTr("语音识别")
+                        color: cSubText
+                        font.pixelSize: 12
+                    }
+                    ScrollView {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        ScrollBar.vertical.policy: ScrollBar.AsNeeded
+                        Text {
+                            width: parent.width
+                            text: transcript.length > 0 ? transcript : qsTr("等待接收语音...")
+                            color: transcript.length > 0 ? cText : cSubText
+                            font.pixelSize: 22
+                            font.bold: transcript.length > 0
+                            wrapMode: Text.Wrap
+                            textFormat: Text.PlainText
+                        }
+                    }
+                }
+
+                // AI 回复
+                ColumnLayout {
+                    visible: aiReply.length > 0
+                    spacing: 6
+                    Layout.fillWidth: true
+                    RowLayout {
+                        spacing: 6
+                        Rectangle {
+                            implicitWidth: 22; implicitHeight: 22; radius: 6
+                            color: cAccent
+                            Text {
+                                anchors.centerIn: parent
+                                text: "AI"
+                                color: "#FFFFFF"
+                                font.pixelSize: 11
+                                font.bold: true
+                            }
+                        }
+                        Text {
+                            text: qsTr("AI 回复")
+                            color: cSubText
+                            font.pixelSize: 12
+                        }
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: aiReply
+                        color: cText
+                        font.pixelSize: 16
+                        wrapMode: Text.Wrap
+                        textFormat: Text.PlainText
+                    }
+                }
+            }
+        }
+
+        // ---- 状态日志 ----
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 140
+            radius: 12
+            color: cCard
+            border.color: cBorder
+
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 0
+                Text {
+                    text: qsTr("运行日志")
+                    color: cSubText
+                    font.pixelSize: 12
+                    leftPadding: 12
+                    topPadding: 8
+                    bottomPadding: 4
+                }
+                ListView {
+                    id: logView
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    spacing: 2
+                    model: logModel
+                    delegate: Text {
+                        width: ListView.view.width
+                        leftPadding: 12
+                        rightPadding: 12
+                        text: model.text
+                        color: model.level === "error" ? cRed
+                             : model.level === "ai" ? cAccent
+                             : model.level === "transcript" ? cText
+                             : cSubText
+                        font.pixelSize: 11
+                        wrapMode: Text.Wrap
+                    }
+                }
+            }
+        }
+    }
+
+    // 连接状态文字与颜色
+    readonly property string connectionStatusText: {
+        if (backend.connected) return qsTr("已连接: ") + backend.deviceName
+        if (backend.scanning) return qsTr("正在扫描设备...")
+        return qsTr("未连接")
+    }
+    readonly property color connectionStatusColor: {
+        if (backend.connected) return cGreen
+        if (backend.scanning) return cYellow
+        return cSubText
+    }
+
+    property bool servicesExpanded: true
+}

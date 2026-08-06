@@ -9,9 +9,22 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 #set(CMAKE_PREFIX_PATH "/opt/Qt/6.11.1/android_arm64_v8a/")
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
-#find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
-find_package(Qt6 REQUIRED COMPONENTS Widgets Bluetooth Concurrent Network)
+
+# Android 目标 Qt 依赖 host 端工具包（Qt6CoreTools 等），
+# 未由 IDE/外部注入 QT_HOST_PATH 时自动指向本机 host Qt。
+if(ANDROID AND NOT QT_HOST_PATH AND EXISTS "/opt/Qt/6.11.1/gcc_64")
+    set(QT_HOST_PATH "/opt/Qt/6.11.1/gcc_64" CACHE PATH "Path to host Qt installation")
+endif()
+
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Quick Qml)
+#find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Quick Qml)
+
+find_package(Qt6 REQUIRED COMPONENTS Quick Qml Bluetooth Concurrent Network)
+
+# QTP0001 NEW：QML 模块资源前缀使用 /qt/qml（默认 QML 导入路径）。
+# OLD 行为（资源放在 :/SmartGlasses/）在 Qt 6.11 上找不到 qmldir，
+# 会导致 loadFromModule 报 "Module contains no type named Main"。
+qt_policy(SET QTP0001 NEW)
 find_package(Qt6LinguistTools QUIET)
 find_package(Qt5LinguistTools QUIET)
 
@@ -41,6 +54,19 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         ${HEADER_FILES}
     )
 
+    # 文件位于 qml/ 子目录，映射到模块根，使 loadFromModule("SmartGlasses", "Main") 可加载
+    # 注意：QT_RESOURCE_ALIAS 必须在 qt6_add_qml_module 之前设置，
+    # 否则宏在调用时读不到该属性，类型会被注册为 SmartGlasses.qml.Main 而非 SmartGlasses.Main
+    set_source_files_properties(qml/Main.qml PROPERTIES QT_RESOURCE_ALIAS "Main.qml")
+
+    # 注册 QML 模块（qml/Main.qml 作为入口界面）
+    qt_add_qml_module(smartglasses_android_app
+        URI SmartGlasses
+        VERSION 1.0
+        QML_FILES
+            qml/Main.qml
+    )
+
 # Define target properties for Android with Qt 6 as:
     set_property(TARGET smartglasses_android_app APPEND PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR
                  ${CMAKE_CURRENT_SOURCE_DIR}/android)
@@ -68,7 +94,8 @@ else()
 endif()
 
 target_link_libraries(smartglasses_android_app PRIVATE
-    Qt${QT_VERSION_MAJOR}::Widgets
+    Qt${QT_VERSION_MAJOR}::Quick
+    Qt${QT_VERSION_MAJOR}::Qml
     Qt${QT_VERSION_MAJOR}::Bluetooth
     Qt${QT_VERSION_MAJOR}::Concurrent
     Qt${QT_VERSION_MAJOR}::Network
@@ -83,14 +110,7 @@ target_include_directories(smartglasses_android_app PRIVATE
 # Qt for Android 不依赖系统 TLS，必须将 OpenSSL 库随 APK 一起打包，
 # 否则 QNetworkAccessManager 请求 https 时会报 TLS 初始化错误。
 if (ANDROID)
-    include(FetchContent)
-    FetchContent_Declare(
-        android_openssl
-        DOWNLOAD_EXTRACT_TIMESTAMP true
-        URL https://github.com/KDAB/android_openssl/archive/refs/heads/master.zip
-    )
-    FetchContent_MakeAvailable(android_openssl)
-    include(${android_openssl_SOURCE_DIR}/android_openssl.cmake)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/third_party/android_openssl/android_openssl.cmake)
     add_android_openssl_libraries(smartglasses_android_app)
 endif()
 
