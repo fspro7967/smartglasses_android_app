@@ -46,18 +46,21 @@ void DeviceHandler::connectToDevice(const QBluetoothDeviceInfo &device)
         return;
     }
 
-    connect(m_controller, &QLowEnergyController::connected, this, [this]() {
+    // 捕获局部 controller 指针而非 m_controller：断开后 m_controller 会被置空，
+    // 而旧控制器在异步删除期间仍可能发出 connected/errorOccurred 信号。
+    connect(m_controller, &QLowEnergyController::connected, this,
+            [this, controller = m_controller]() {
         emit statusChanged("Connected. Discovering services...");
         emit connected();
-        m_controller->discoverServices();
+        controller->discoverServices();
     });
     connect(m_controller, &QLowEnergyController::disconnected, this, [this]() {
         emit statusChanged("Disconnected.");
         emit disconnected();
     });
     connect(m_controller, &QLowEnergyController::errorOccurred,
-            this, [this](QLowEnergyController::Error) {
-                emit statusChanged("Controller error: " + m_controller->errorString());
+            this, [this, controller = m_controller](QLowEnergyController::Error) {
+                emit statusChanged("Controller error: " + controller->errorString());
             });
     connect(m_controller, &QLowEnergyController::serviceDiscovered,
             this, &DeviceHandler::onServiceDiscovered);
@@ -84,9 +87,13 @@ void DeviceHandler::disconnectDevice()
     m_pendingServiceDetails = 0;
 
     if (m_controller) {
-        m_controller->disconnectFromDevice();
-        delete m_controller;
+        QLowEnergyController *controller = m_controller;
         m_controller = nullptr;
+        // disconnectFromDevice() 是异步操作，disconnected 信号在设备实际断开后才发出；
+        // 立即 delete 会导致信号丢失（UI 无法感知断开），改为收到信号后再延迟删除。
+        connect(controller, &QLowEnergyController::disconnected,
+                controller, &QObject::deleteLater);
+        controller->disconnectFromDevice();
     }
 }
 

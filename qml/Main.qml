@@ -346,7 +346,7 @@ ApplicationWindow {
             }
         }
 
-        // ---- 识别与 AI 回复（主显示区） ----
+        // ---- 识别与 AI 回复（主显示区，标签页切换） ----
         Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -359,19 +359,82 @@ ApplicationWindow {
                 anchors.margins: 14
                 spacing: 10
 
-                // 语音识别字幕
-                ColumnLayout {
-                    spacing: 6
+                // 标签页切换
+                Row {
+                    spacing: 0
+
+                    // 语音识别标签
+                    ItemDelegate {
+                        width: tabText0.implicitWidth + 16
+                        height: 30
+                        padding: 0
+                        background: Rectangle { color: "transparent" }
+                        onClicked: root.mainTabIndex = 0
+                        contentItem: Column {
+                            spacing: 0
+                            Text {
+                                id: tabText0
+                                text: qsTr("语音识别")
+                                color: root.mainTabIndex === 0 ? cText : cSubText
+                                font.pixelSize: 13
+                                font.bold: root.mainTabIndex === 0
+                            }
+                            Rectangle {
+                                width: parent.width
+                                height: 2
+                                radius: 1
+                                color: root.mainTabIndex === 0 ? cAccent : "transparent"
+                            }
+                        }
+                    }
+
+                    // AI 回复标签（新回复到达时显示红点）
+                    ItemDelegate {
+                        width: tabText1.implicitWidth + 16 + (root.aiUnread ? 16 : 0)
+                        height: 30
+                        padding: 0
+                        background: Rectangle { color: "transparent" }
+                        onClicked: {
+                            root.mainTabIndex = 1
+                            root.aiUnread = false
+                        }
+                        contentItem: Column {
+                            spacing: 0
+                            Row {
+                                spacing: 4
+                                Text {
+                                    id: tabText1
+                                    text: qsTr("AI 回复")
+                                    color: root.mainTabIndex === 1 ? cText : cSubText
+                                    font.pixelSize: 13
+                                    font.bold: root.mainTabIndex === 1
+                                }
+                                Rectangle {
+                                    visible: root.aiUnread
+                                    width: 8
+                                    height: 8
+                                    radius: 4
+                                    color: cRed
+                                }
+                            }
+                            Rectangle {
+                                width: parent.width
+                                height: 2
+                                radius: 1
+                                color: root.mainTabIndex === 1 ? cAccent : "transparent"
+                            }
+                        }
+                    }
+                }
+
+                // 内容区：两个页面共用同一位置
+                StackLayout {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    Text {
-                        text: qsTr("语音识别")
-                        color: cSubText
-                        font.pixelSize: 12
-                    }
+                    currentIndex: root.mainTabIndex
+
+                    // 页 0：语音识别字幕
                     ScrollView {
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
                         ScrollBar.vertical.policy: ScrollBar.AsNeeded
                         Text {
                             width: parent.width
@@ -381,41 +444,22 @@ ApplicationWindow {
                             font.bold: transcript.length > 0
                             wrapMode: Text.Wrap
                             textFormat: Text.PlainText
+                            verticalAlignment: Text.AlignTop
                         }
                     }
-                }
 
-                // AI 回复
-                ColumnLayout {
-                    visible: aiReply.length > 0
-                    spacing: 6
-                    Layout.fillWidth: true
-                    RowLayout {
-                        spacing: 6
-                        Rectangle {
-                            implicitWidth: 22; implicitHeight: 22; radius: 6
-                            color: cAccent
-                            Text {
-                                anchors.centerIn: parent
-                                text: "AI"
-                                color: "#FFFFFF"
-                                font.pixelSize: 11
-                                font.bold: true
-                            }
-                        }
+                    // 页 1：AI 回复
+                    ScrollView {
+                        ScrollBar.vertical.policy: ScrollBar.AsNeeded
                         Text {
-                            text: qsTr("AI 回复")
-                            color: cSubText
-                            font.pixelSize: 12
+                            width: parent.width
+                            text: aiReply.length > 0 ? aiReply : qsTr("等待 AI 回复...")
+                            color: aiReply.length > 0 ? cText : cSubText
+                            font.pixelSize: 16
+                            wrapMode: Text.Wrap
+                            textFormat: Text.PlainText
+                            verticalAlignment: Text.AlignTop
                         }
-                    }
-                    Text {
-                        Layout.fillWidth: true
-                        text: aiReply
-                        color: cText
-                        font.pixelSize: 16
-                        wrapMode: Text.Wrap
-                        textFormat: Text.PlainText
                     }
                 }
             }

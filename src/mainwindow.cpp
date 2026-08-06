@@ -97,6 +97,11 @@ void MainWindow::connectToDevice(int index)
 void MainWindow::disconnectDevice()
 {
     m_deviceHandler->disconnectDevice();
+    // 主动断开时立即同步 UI 状态（BLE 断开事件异步到达，避免界面滞后）
+    m_isConnected = false;
+    m_deviceName.clear();
+    emit connectionChanged();
+    clearServices();
     emit statusMessage("正在断开连接...");
 }
 
