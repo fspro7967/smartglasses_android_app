@@ -30,6 +30,10 @@ ApplicationWindow {
 
     property string transcript: ""
     property string aiReply: ""
+    // 主内容区标签页索引（0 = 语音识别，1 = AI 回复）
+    property int mainTabIndex: 0
+    // 收到新 AI 回复但用户仍停留在其他标签页时的未读标记
+    property bool aiUnread: false
     // 当前选中的设备索引（ListView.currentIndex 点击不会自动更新，需显式维护）
     property int selectedDeviceIndex: -1
     // 指定设备是否处于已连接状态
@@ -66,6 +70,8 @@ ApplicationWindow {
 
         function onAiResponseReady(text) {
             root.aiReply = text
+            if (root.mainTabIndex !== 1)
+                root.aiUnread = true
             logModel.append({ text: "[AI] " + text, level: "ai" })
             trimLog()
         }
