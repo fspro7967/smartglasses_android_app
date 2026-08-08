@@ -1,4 +1,19 @@
 {
     "cmake.options.statusBarVisibility": "visible",
-    "cmake.buildDirectory": "${workspaceFolder}/builds/${buildKit}/${buildType}"
+    "cmake.buildDirectory": "${workspaceFolder}/builds/${buildKit}/${buildType}",
+        "cmake.configureSettings": {
+        "CMAKE_PREFIX_PATH": "/opt/Qt/6.11.1/android_arm64_v8a",
+        "QT_HOST_PATH": "/opt/Qt/6.11.1/gcc_64",
+        "CMAKE_TOOLCHAIN_FILE": "/opt/Qt/6.11.1/android_arm64_v8a/lib/cmake/Qt6/qt.toolchain.cmake",
+        "ANDROID_ABI": "arm64-v8a",
+        "ANDROID_PLATFORM": "android-28",
+        "ANDROID_NDK_ROOT": "/home/promise/Android/Sdk/ndk/27.2.12479018",
+        "ANDROID_SDK_ROOT": "/home/promise/Android/Sdk",
+        "JAVA_HOME": "/opt/android-studio/jbr/",
+        "KEYSTORE": "${workspaceFolder}/android_release.keystore",
+        "STORE_PASS": "smartglasses",
+        "ALIAS": "smartglasses",
+        "KEY_PASS": "smartglasses"
+    },
+    "java.configuration.updateBuildConfiguration": "interactive"
 }
