@@ -36,6 +36,18 @@ public:
     Q_INVOKABLE void processAudioFile(const QString &filePath);
     Q_INVOKABLE void sendMessageToServer(const QString &message);
 
+    // ===== AI 大模型接入方式（暴露给 QML 的设置菜单） =====
+    Q_INVOKABLE int aiProvider() const;                            // 0=API, 1=Ollama
+    Q_INVOKABLE QString aiProviderName() const;                    // 当前接入方式名称
+    Q_INVOKABLE QString apiBaseUrl() const;
+    Q_INVOKABLE QString apiKey() const;
+    Q_INVOKABLE QString apiModelName() const;
+    Q_INVOKABLE QString ollamaUrl() const;
+    Q_INVOKABLE QString ollamaModelName() const;
+    Q_INVOKABLE void setAiProvider(int provider);
+    Q_INVOKABLE void setApiConfig(const QString &baseUrl, const QString &apiKey, const QString &modelName);
+    Q_INVOKABLE void setOllamaConfig(const QString &serverUrl, const QString &modelName);
+
 signals:
     void deviceDiscovered(const QString &name);                       // 发现新设备
     void statusMessage(const QString &msg);                           // 状态/日志消息
@@ -44,6 +56,7 @@ signals:
     void aiResponseReady(const QString &response);                    // AI 大模型回复
     void scanningChanged();
     void connectionChanged();
+    void aiConfigChanged();                                           // AI 接入方式/配置已变更
 
 private slots:
     void onDataReceived(const QByteArray &data);

@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
-import QtQuick.Dialogs
+import QtQuick.Dialogs as QDialogs
 
 ApplicationWindow {
     id: root
@@ -41,8 +41,16 @@ ApplicationWindow {
         return backend.connected && index === root.selectedDeviceIndex
     }
 
+    // 当前 AI 接入方式显示文本（API / Ollama）
+    property string aiModeText: "API · " + backend.apiModelName()
+    function updateAiModeText() {
+        root.aiModeText = backend.aiProvider() === 1
+            ? "Ollama · " + backend.ollamaModelName()
+            : "API · " + backend.apiModelName()
+    }
+
     // 选择音频文件并送入 Whisper 识别
-    FileDialog {
+    QDialogs.FileDialog {
         id: audioDialog
         title: qsTr("选择音频文件")
         nameFilters: [qsTr("音频文件 (*.wav *.pcm)"), qsTr("所有文件 (*)")]
@@ -74,6 +82,10 @@ ApplicationWindow {
                 root.aiUnread = true
             logModel.append({ text: "[AI] " + text, level: "ai" })
             trimLog()
+        }
+
+        function onAiConfigChanged() {
+            root.updateAiModeText()
         }
     }
 
@@ -149,6 +161,124 @@ ApplicationWindow {
                 }
                 implicitHeight: 36
                 implicitWidth: 76
+            }
+
+            // ---- 右上角设置菜单（AI 大模型接入方式） ----
+            Button {
+                id: moreBtn
+                text: "⋮"
+                onClicked: settingsMenu.popup()
+                contentItem: Text {
+                    text: parent.text
+                    color: cText
+                    font.pixelSize: 20
+                    font.bold: true
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    radius: 8
+                    color: moreBtn.down ? "#2A3342" : cBorder
+                }
+                implicitHeight: 36
+                implicitWidth: 40
+
+                Menu {
+                    id: settingsMenu
+                    x: parent.width - width
+                    y: parent.height + 4
+                    transformOrigin: Menu.TopRight
+                    width: 240
+
+                    // 深色主题
+                    palette {
+                        window: cCard
+                        windowText: cText
+                        base: cCard
+                        alternateBase: cCard
+                        text: cText
+                        button: cCard
+                        buttonText: cText
+                        highlight: cAccent
+                        highlightedText: "#FFFFFF"
+                        toolTipBase: cCard
+                        toolTipText: cText
+                    }
+                    background: Rectangle {
+                        color: cCard
+                        border.color: cBorder
+                        border.width: 1
+                        radius: 10
+                    }
+
+                    MenuItem {
+                        enabled: false
+                        height: 30
+                        contentItem: Text {
+                            text: qsTr("AI 大模型接入方式")
+                            color: cSubText
+                            font.pixelSize: 12
+                            font.bold: true
+                            leftPadding: 12
+                        }
+                    }
+                    MenuSeparator {
+                        contentItem: Rectangle {
+                            implicitWidth: parent.width
+                            implicitHeight: 1
+                            color: cBorder
+                        }
+                    }
+
+                    MenuItem {
+                        text: qsTr("OpenAI 兼容 API 配置")
+                        highlighted: backend.aiProvider() === 0
+                        onClicked: apiConfigDialog.open()
+                        contentItem: Text {
+                            text: parent.text
+                            color: parent.highlighted ? "#FFFFFF" : cText
+                            font.pixelSize: 13
+                            leftPadding: 12
+                        }
+                        background: Rectangle {
+                            color: parent.highlighted ? cAccent
+                                 : (parent.hovered ? "#1E2532" : "transparent")
+                        }
+                    }
+                    MenuItem {
+                        text: qsTr("本地 Ollama 部署")
+                        highlighted: backend.aiProvider() === 1
+                        onClicked: ollamaConfigDialog.open()
+                        contentItem: Text {
+                            text: parent.text
+                            color: parent.highlighted ? "#FFFFFF" : cText
+                            font.pixelSize: 13
+                            leftPadding: 12
+                        }
+                        background: Rectangle {
+                            color: parent.highlighted ? cAccent
+                                 : (parent.hovered ? "#1E2532" : "transparent")
+                        }
+                    }
+
+                    MenuSeparator {
+                        contentItem: Rectangle {
+                            implicitWidth: parent.width
+                            implicitHeight: 1
+                            color: cBorder
+                        }
+                    }
+                    MenuItem {
+                        enabled: false
+                        height: 30
+                        contentItem: Text {
+                            text: qsTr("当前接入: ") + root.aiModeText
+                            color: cSubText
+                            font.pixelSize: 12
+                            leftPadding: 12
+                        }
+                    }
+                }
             }
         }
     }
@@ -527,4 +657,328 @@ ApplicationWindow {
     }
 
     property bool servicesExpanded: true
+
+    // ==================== OpenAI 兼容 API 配置对话框 ====================
+    Dialog {
+        id: apiConfigDialog
+        modal: true
+        anchors.centerIn: parent
+        width: Math.min(parent.width - 40, 380)
+        padding: 0
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        standardButtons: Dialog.NoButton
+        background: Rectangle {
+            color: cCard
+            border.color: cBorder
+            border.width: 1
+            radius: 12
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 0
+
+            // 标题
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 50
+                color: "transparent"
+                Text {
+                    anchors.fill: parent
+                    anchors.leftMargin: 20
+                    verticalAlignment: Text.AlignVCenter
+                    text: qsTr("OpenAI 兼容 API 配置")
+                    color: cText
+                    font.pixelSize: 16
+                    font.bold: true
+                }
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: 20
+                Layout.rightMargin: 20
+                Layout.bottomMargin: 16
+                spacing: 8
+
+                Text { text: qsTr("API_BASE_URL"); color: cSubText; font.pixelSize: 12 }
+                TextField {
+                    id: apiBaseUrlField
+                    Layout.fillWidth: true
+                    text: backend.apiBaseUrl()
+                    placeholderText: ""
+                    placeholderTextColor: cSubText
+                    selectByMouse: true
+                    leftPadding: 12
+                    rightPadding: 12
+                    font.pixelSize: 14
+                    color: cText
+                    background: Rectangle {
+                        color: "#1E2532"
+                        border.color: apiBaseUrlField.activeFocus ? cAccent : cBorder
+                        border.width: 1
+                        radius: 8
+                        implicitHeight: 44
+                    }
+                }
+
+                Text { text: qsTr("API_KEY"); color: cSubText; font.pixelSize: 12 }
+                TextField {
+                    id: apiKeyField
+                    Layout.fillWidth: true
+                    text: backend.apiKey()
+                    placeholderText: ""
+                    placeholderTextColor: cSubText
+                    echoMode: TextInput.Password
+                    selectByMouse: true
+                    leftPadding: 12
+                    rightPadding: 12
+                    font.pixelSize: 14
+                    color: cText
+                    background: Rectangle {
+                        color: "#1E2532"
+                        border.color: apiKeyField.activeFocus ? cAccent : cBorder
+                        border.width: 1
+                        radius: 8
+                        implicitHeight: 44
+                    }
+                }
+
+                Text { text: qsTr("MODEL_NAME"); color: cSubText; font.pixelSize: 12 }
+                TextField {
+                    id: apiModelField
+                    Layout.fillWidth: true
+                    text: backend.apiModelName()
+                    placeholderText: ""
+                    placeholderTextColor: cSubText
+                    selectByMouse: true
+                    leftPadding: 12
+                    rightPadding: 12
+                    font.pixelSize: 14
+                    color: cText
+                    background: Rectangle {
+                        color: "#1E2532"
+                        border.color: apiModelField.activeFocus ? cAccent : cBorder
+                        border.width: 1
+                        radius: 8
+                        implicitHeight: 44
+                    }
+                }
+
+                Text {
+                    id: apiConfigError
+                    visible: false
+                    color: cRed
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.topMargin: 4
+                    spacing: 10
+
+                    Button {
+                        text: qsTr("取消")
+                        Layout.fillWidth: true
+                        implicitHeight: 40
+                        onClicked: apiConfigDialog.close()
+                        contentItem: Text {
+                            text: parent.text
+                            color: cText
+                            font.pixelSize: 14
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        background: Rectangle { radius: 8; color: cBorder }
+                    }
+                    Button {
+                        text: qsTr("保存并启用")
+                        Layout.fillWidth: true
+                        implicitHeight: 40
+                        onClicked: {
+                            var baseUrl = apiBaseUrlField.text.trim()
+                            var apiKey  = apiKeyField.text.trim()
+                            var model   = apiModelField.text.trim()
+                            if (baseUrl === "" || apiKey === "" || model === "") {
+                                apiConfigError.text = qsTr("请完整填写 API_BASE_URL、API_KEY、MODEL_NAME 三个配置项")
+                                apiConfigError.visible = true
+                                return
+                            }
+                            backend.setApiConfig(baseUrl, apiKey, model)
+                            backend.setAiProvider(0)
+                            apiConfigError.visible = false
+                            apiConfigDialog.close()
+                        }
+                        contentItem: Text {
+                            text: parent.text
+                            color: "#FFFFFF"
+                            font.pixelSize: 14
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        background: Rectangle { radius: 8; color: cAccent }
+                    }
+                }
+            }
+        }
+    }
+
+    // ==================== 本地 Ollama 配置对话框 ====================
+    Dialog {
+        id: ollamaConfigDialog
+        modal: true
+        anchors.centerIn: parent
+        width: Math.min(parent.width - 40, 380)
+        padding: 0
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        standardButtons: Dialog.NoButton
+        background: Rectangle {
+            color: cCard
+            border.color: cBorder
+            border.width: 1
+            radius: 12
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 0
+
+            // 标题
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 50
+                color: "transparent"
+                Text {
+                    anchors.fill: parent
+                    anchors.leftMargin: 20
+                    verticalAlignment: Text.AlignVCenter
+                    text: qsTr("本地 Ollama 配置")
+                    color: cText
+                    font.pixelSize: 16
+                    font.bold: true
+                }
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: 20
+                Layout.rightMargin: 20
+                Layout.bottomMargin: 16
+                spacing: 8
+
+                Text {
+                    text: qsTr("请在电脑上安装并运行 Ollama（终端执行 ollama serve），")
+                    color: cSubText
+                    font.pixelSize: 11
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+                Text {
+                    text: qsTr("手机与电脑需处于同一局域网，地址请填写电脑的局域网 IP。")
+                    color: cSubText
+                    font.pixelSize: 11
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+
+                Text { text: qsTr("服务器地址"); color: cSubText; font.pixelSize: 12 }
+                TextField {
+                    id: ollamaUrlField
+                    Layout.fillWidth: true
+                    text: backend.ollamaUrl()
+                    placeholderText: ""
+                    placeholderTextColor: cSubText
+                    selectByMouse: true
+                    leftPadding: 12
+                    rightPadding: 12
+                    font.pixelSize: 14
+                    color: cText
+                    background: Rectangle {
+                        color: "#1E2532"
+                        border.color: ollamaUrlField.activeFocus ? cAccent : cBorder
+                        border.width: 1
+                        radius: 8
+                        implicitHeight: 44
+                    }
+                }
+
+                Text { text: qsTr("模型名称"); color: cSubText; font.pixelSize: 12 }
+                TextField {
+                    id: ollamaModelField
+                    Layout.fillWidth: true
+                    text: backend.ollamaModelName()
+                    placeholderText: ""
+                    placeholderTextColor: cSubText
+                    selectByMouse: true
+                    leftPadding: 12
+                    rightPadding: 12
+                    font.pixelSize: 14
+                    color: cText
+                    background: Rectangle {
+                        color: "#1E2532"
+                        border.color: ollamaModelField.activeFocus ? cAccent : cBorder
+                        border.width: 1
+                        radius: 8
+                        implicitHeight: 44
+                    }
+                }
+
+                Text {
+                    id: ollamaConfigError
+                    visible: false
+                    color: cRed
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.topMargin: 4
+                    spacing: 10
+
+                    Button {
+                        text: qsTr("取消")
+                        Layout.fillWidth: true
+                        implicitHeight: 40
+                        onClicked: ollamaConfigDialog.close()
+                        contentItem: Text {
+                            text: parent.text
+                            color: cText
+                            font.pixelSize: 14
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        background: Rectangle { radius: 8; color: cBorder }
+                    }
+                    Button {
+                        text: qsTr("保存并启用")
+                        Layout.fillWidth: true
+                        implicitHeight: 40
+                        onClicked: {
+                            var serverUrl = ollamaUrlField.text.trim()
+                            var model     = ollamaModelField.text.trim()
+                            if (serverUrl === "" || model === "") {
+                                ollamaConfigError.text = qsTr("请完整填写服务器地址与模型名称")
+                                ollamaConfigError.visible = true
+                                return
+                            }
+                            backend.setOllamaConfig(serverUrl, model)
+                            backend.setAiProvider(1)
+                            ollamaConfigError.visible = false
+                            ollamaConfigDialog.close()
+                        }
+                        contentItem: Text {
+                            text: parent.text
+                            color: "#FFFFFF"
+                            font.pixelSize: 14
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        background: Rectangle { radius: 8; color: cAccent }
+                    }
+                }
+            }
+        }
+    }
 }

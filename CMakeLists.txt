@@ -8,7 +8,6 @@ set(CMAKE_AUTORCC ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-#set(CMAKE_PREFIX_PATH "/opt/Qt/6.11.1/android_arm64_v8a/")
 
 # Android 目标 Qt 依赖 host 端工具包（Qt6CoreTools 等），
 # 未由 IDE/外部注入 QT_HOST_PATH 时自动指向本机 host Qt。
@@ -17,7 +16,6 @@ if(ANDROID AND NOT QT_HOST_PATH AND EXISTS "/opt/Qt/6.11.1/gcc_64")
 endif()
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Quick Qml)
-#find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Quick Qml)
 
 find_package(Qt6 REQUIRED COMPONENTS Quick Qml Bluetooth Concurrent Network)
 
@@ -41,8 +39,6 @@ add_subdirectory(third_party/whisper.cpp)
 # 禁用 OpenMP，避免依赖 libomp.so
 set(GGML_OPENMP OFF CACHE BOOL "Disable OpenMP for Android" FORCE)
 set(GGML_OPENMP OFF)
-
-#add_subdirectory(third_party/whisper.cpp-master)
 
 file(GLOB_RECURSE SRC_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 file(GLOB_RECURSE HEADER_FILES ${CMAKE_CURRENT_SOURCE_DIR}/includes/*.h)
@@ -106,7 +102,6 @@ target_include_directories(smartglasses_android_app PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/whisper.cpp/include   # 头文件路径
 )
 
-# ==================== Android OpenSSL（TLS/HTTPS 支持） ====================
 # Qt for Android 不依赖系统 TLS，必须将 OpenSSL 库随 APK 一起打包，
 # 否则 QNetworkAccessManager 请求 https 时会报 TLS 初始化错误。
 if (ANDROID)

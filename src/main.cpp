@@ -11,6 +11,10 @@ int main(int argc, char *argv[])
 {
     QGuiApplication app(argc, argv);
 
+    // 设置组织/应用名，使 QSettings（AI 配置持久化）能正常工作
+    QCoreApplication::setOrganizationName("SmartGlasses");
+    QCoreApplication::setApplicationName("SmartGlassesAssistant");
+
     QTranslator translator;
     const QStringList uiLanguages = QLocale::system().uiLanguages();
     for (const QString &locale : uiLanguages) {

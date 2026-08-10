@@ -133,6 +133,71 @@ void MainWindow::sendMessageToServer(const QString &message)
     }
 }
 
+// ==================== AI 大模型接入方式 ====================
+int MainWindow::aiProvider() const
+{
+    return m_msgsender ? static_cast<int>(m_msgsender->provider()) : 0;
+}
+
+QString MainWindow::aiProviderName() const
+{
+    if (!m_msgsender) return QString();
+    return m_msgsender->provider() == MsgSender::ProviderOllama
+            ? QStringLiteral("本地 Ollama")
+            : QStringLiteral("OpenAI 兼容 API");
+}
+
+QString MainWindow::apiBaseUrl() const
+{
+    return m_msgsender ? m_msgsender->apiBaseUrl() : QString();
+}
+
+QString MainWindow::apiKey() const
+{
+    return m_msgsender ? m_msgsender->apiKey() : QString();
+}
+
+QString MainWindow::apiModelName() const
+{
+    return m_msgsender ? m_msgsender->apiModelName() : QString();
+}
+
+QString MainWindow::ollamaUrl() const
+{
+    return m_msgsender ? m_msgsender->ollamaUrl() : QString();
+}
+
+QString MainWindow::ollamaModelName() const
+{
+    return m_msgsender ? m_msgsender->ollamaModelName() : QString();
+}
+
+void MainWindow::setAiProvider(int provider)
+{
+    if (!m_msgsender) return;
+    m_msgsender->setProvider(static_cast<MsgSender::Provider>(provider));
+    emit aiConfigChanged();
+    emit statusMessage(provider == MsgSender::ProviderOllama
+                       ? "已切换到本地 Ollama 接入"
+                       : "已切换到 OpenAI 兼容 API 接入");
+}
+
+void MainWindow::setApiConfig(const QString &baseUrl, const QString &apiKey, const QString &modelName)
+{
+    if (!m_msgsender) return;
+    m_msgsender->setApiConfig(baseUrl, apiKey, modelName);
+    emit aiConfigChanged();
+    emit statusMessage("API 配置已保存（模型: " + modelName + "）");
+}
+
+void MainWindow::setOllamaConfig(const QString &serverUrl, const QString &modelName)
+{
+    if (!m_msgsender) return;
+    m_msgsender->setOllamaConfig(serverUrl, modelName);
+    emit aiConfigChanged();
+    emit statusMessage("Ollama 配置已保存（模型: " + modelName + "）");
+}
+
 void MainWindow::clearServices()
 {
     m_services.clear();
