@@ -10,18 +10,20 @@ The APP is written with Qt in C++, so you need to install Qt Creator(Recommended
 ### With Visual Studio Code
 Yes, I know many developers like coding in VSCode, but it's a pity that we can not completly say goodbye to Qt Creator and Android SDK. 
 
-First, you need to install Qt and Android SDK as what I mentioned above.
+- First, you need to install Qt and Android SDK as what I mentioned above.
 
 __MAKE SURE THAT EVERYTHING WORK WELL IN QT CREATOR__, it can save a lot of efforts when configuring in VSCode.
 
-Then, install these extensions in VSCode: C/C++, Qt C++, CMake Tools, Gradle for Java, Language Support for Java(TM) by Red Hat.
+- Then, install these extensions in VSCode: C/C++, Qt C++, CMake Tools, Gradle for Java, Language Support for Java(TM) by Red Hat.
 
-Next, edit the paths in settings.json according to your own environment.
+- Next, edit the paths in settings.json according to your own environment.
 
-Finally, press F1 to open the command panel and type CMake: Delete cache, Reconfigure and Build. Choose Qt-\[your-version\]-android_arm64_v8a-arm64 as toolkit.
+- Finally, press F1 to open the command panel and type CMake: Delete cache, Reconfigure and Build. Choose Qt-\[your-version\]-android_arm64_v8a-arm64 as toolkit.
 
+## If you want to try our app......
+APK built in release mode is recommended since we enable optimization in processing speed and accuracy.
 ## Todo
-- Upload the ASR results to our AI model and get its response via Tailscale API
+- ~~ Upload the ASR results to our AI model and get its response via Ollama API ~~
 - Send the AI response to the bluetooth device.
 - (Maybe)Integrate a simple model on mobile phone to anwser some simple questions when offline, and improve the responding speed.
 -  ~~ Improve the GUI, rebuild the app with QML ~~
