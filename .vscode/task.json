@@ -1,0 +1,13 @@
+{
+            "label": "InstallDebugApp",
+            "type": "shell",
+            "command": " ",
+            "windows": {
+                "command": "adb install /data/SmartGlasses/smartglasses_android_app/builds/Qt-6.11.1-android_arm64_v8a-arm64/Debug/android-build/build/outputs/apk/debug/android-build-debug.apk "
+            },
+            "group": "test",
+            "presentation": {
+              "reveal": "always",
+               "panel": "new"
+            }
+}

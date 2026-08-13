@@ -1,0 +1,25 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "android",
+            "request": "launch",
+            "name": "Android launch",
+            "appSrcRoot": "${workspaceRoot}/android/",
+            "apkFile": "${workspaceRoot}/builds/Qt-6.11.1-android_arm64_v8a-arm64/Debug/android-build/build/outputs/apk/debug/android-build-debug.apk",
+            "adbPort": 5037,
+        "preLaunchTask": "InstallDebugApp"
+        },
+        {
+            "type": "android",
+            "request": "attach",
+            "name": "Android attach",
+            "appSrcRoot": "${workspaceRoot}/android/",
+            "adbPort": 5037,
+            "processId": "${command:PickAndroidProcess}"
+        }
+    ]
+}

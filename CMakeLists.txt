@@ -134,40 +134,63 @@ if(QT_VERSION_MAJOR EQUAL 6)
     qt_finalize_executable(smartglasses_android_app)
 endif()
 
+# 可选：APK 构建完成后自动安装到已连接的 Android 设备
+option(AUTO_INSTALL_APK "Automatically install the built APK on a connected device after the apk target completes" ON)
+
 # Qt 6.11 的 CMake 部署目标会生成 unsigned APK；QT_ANDROID_SIGN_APK
 # 不是该版本的有效 target property，因此在 APK 目标完成后显式调用 apksigner。
-if (ANDROID AND CMAKE_BUILD_TYPE STREQUAL "Release" AND QT_VERSION_MAJOR EQUAL 6)
-    set(RELEASE_APK "${CMAKE_BINARY_DIR}/android-build/smartglasses_android_app.apk")
-    set(SIGNED_APK "${RELEASE_APK}.signed")
-    find_program(APKSIGNER_EXECUTABLE
-        NAMES apksigner
-        PATHS "${ANDROID_SDK_ROOT}/build-tools/37.0.0"
-        NO_DEFAULT_PATH
-    )
-    if (NOT APKSIGNER_EXECUTABLE)
-        message(FATAL_ERROR "Cannot find apksigner under ${ANDROID_SDK_ROOT}/build-tools/37.0.0")
-    endif()
-    if (NOT EXISTS "${KEYSTORE}")
-        message(FATAL_ERROR "Android release keystore does not exist: ${KEYSTORE}")
+if (ANDROID AND QT_VERSION_MAJOR EQUAL 6)
+    # androiddeployqt 产出的最终 APK（Debug 为 debug 签名，Release 在下方签名后覆盖回此路径）
+    set(APK_PATH "${CMAKE_BINARY_DIR}/android-build/smartglasses_android_app.apk")
+
+    if (CMAKE_BUILD_TYPE STREQUAL "Release")
+        set(SIGNED_APK "${APK_PATH}.signed")
+        find_program(APKSIGNER_EXECUTABLE
+            NAMES apksigner
+            PATHS "${ANDROID_SDK_ROOT}/build-tools/37.0.0"
+            NO_DEFAULT_PATH
+        )
+        if (NOT APKSIGNER_EXECUTABLE)
+            message(FATAL_ERROR "Cannot find apksigner under ${ANDROID_SDK_ROOT}/build-tools/37.0.0")
+        endif()
+        if (NOT EXISTS "${KEYSTORE}")
+            message(FATAL_ERROR "Android release keystore does not exist: ${KEYSTORE}")
+        endif()
+
+        add_custom_command(
+            OUTPUT "${SIGNED_APK}"
+            DEPENDS "${APK_PATH}"
+            COMMAND "${APKSIGNER_EXECUTABLE}" sign
+                --ks "${KEYSTORE}"
+                --ks-pass "pass:${STORE_PASS}"
+                --key-pass "pass:${KEY_PASS}"
+                --ks-key-alias "${ALIAS}"
+                --out "${SIGNED_APK}" "${APK_PATH}"
+            COMMAND "${CMAKE_COMMAND}" -E copy "${SIGNED_APK}" "${APK_PATH}"
+            COMMAND "${CMAKE_COMMAND}" -E rm -f "${SIGNED_APK}"
+            COMMENT "Signing Android APK with release keystore: ${APK_PATH}"
+            VERBATIM
+        )
+        add_custom_target(smartglasses_android_app_sign_apk DEPENDS "${SIGNED_APK}")
+        add_dependencies(apk smartglasses_android_app_sign_apk)
     endif()
 
-    add_custom_command(
-        OUTPUT "${SIGNED_APK}"
-        DEPENDS "${RELEASE_APK}"
-        COMMAND "${APKSIGNER_EXECUTABLE}" sign
-            --ks "${KEYSTORE}"
-            --ks-pass "pass:${STORE_PASS}"
-            --key-pass "pass:${KEY_PASS}"
-            --ks-key-alias "${ALIAS}"
-            --out "${SIGNED_APK}" "${RELEASE_APK}"
-        COMMAND "${CMAKE_COMMAND}" -E copy "${SIGNED_APK}" "${RELEASE_APK}"
-        COMMAND "${CMAKE_COMMAND}" -E rm -f "${SIGNED_APK}"
-        COMMENT "Signing Android APK with release keystore"
-        COMMENT "Signed APK: ${RELEASE_APK}"
-        VERBATIM
-    )
-    add_custom_target(smartglasses_android_app_sign_apk DEPENDS "${SIGNED_APK}")
-    add_dependencies(apk smartglasses_android_app_sign_apk)
+    # 统一在 apk 目标（Debug 打包 / Release 打包+签名）全部完成后再安装。
+    # 注意不要挂到可执行目标 smartglasses_android_app 的 POST_BUILD 上——
+    # 那会在 APK 打包完成之前就执行，导致安装的文件不存在或版本过期。
+    if (AUTO_INSTALL_APK)
+        # CMake 4.x 已移除 `cmake -E adb` 子命令，需直接调用 adb 可执行文件
+        find_program(ADB_EXECUTABLE NAMES adb)
+        if (NOT ADB_EXECUTABLE)
+            message(WARNING "AUTO_INSTALL_APK is enabled but adb was not found in PATH; skipping auto-install")
+        else()
+            add_custom_command(
+                TARGET apk POST_BUILD
+                COMMAND "${ADB_EXECUTABLE}" install -r "${APK_PATH}"
+                COMMENT "Installing APK on connected device"
+            )
+        endif()
+    endif()
 endif()
 
 if (ANDROID)
