@@ -34,25 +34,25 @@ bool WhisperManager::init(const QString &modelPath)
 
 void WhisperManager::feedAudioData(const int16_t *data, size_t sampleCount)
 {
-    std::vector<float> m_audioBuffer_1 ;
+    std::vector<float> m_audioBuffer ;
     if (!data || sampleCount == 0) {
         emit errorOccurred("未收到有效音频样本");
         return;
     }
 
     for (size_t i = 0; i < sampleCount; ++i) {
-        m_audioBuffer_1.push_back(static_cast<float>(data[i]) / 32768.0f);
+        m_audioBuffer.push_back(static_cast<float>(data[i]) / 32768.0f);
     }
 
     qDebug() << "WhisperManager::feedAudioData sampleCount=" << sampleCount
-             << "bufferSize=" << m_audioBuffer_1.size();
-    emit errorOccurred(QString("已接收 %1 个音频样本，当前缓存 %2 个样本").arg(sampleCount).arg(m_audioBuffer_1.size()));
+             << "bufferSize=" << m_audioBuffer.size();
+    emit errorOccurred(QString("已接收 %1 个音频样本，当前缓存 %2 个样本").arg(sampleCount).arg(m_audioBuffer.size()));
 
-    if (m_audioBuffer_1.size() >= CHUNK_SIZE && !m_isProcessing) {
+    if (m_audioBuffer.size() >= CHUNK_SIZE && !m_isProcessing) {
         m_isProcessing = true;
 
-        auto audioChunk = std::move(m_audioBuffer_1);
-        m_audioBuffer_1.clear();
+        auto audioChunk = std::move(m_audioBuffer);
+        //m_audioBuffer.clear();
         qDebug() << "Start Whisper processing with" << audioChunk.size() << "samples";
 
         QFuture<void> future = QtConcurrent::run([this, audioChunk = std::move(audioChunk)]() {
@@ -80,18 +80,19 @@ void WhisperManager::processBuffer(const std::vector<float> &audioChunk)
     struct whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     params.n_threads = 4;
     //params.language = "auto";
-    params.print_realtime = true;
+    params.print_realtime = false;
     params.print_progress = false;
-    params.print_timestamps = true;
+    params.print_timestamps = false;
     params.print_special = false;
     params.translate = false;
     params.language = "en";
     params.offset_ms = 0;
-    params.no_context = true;
+    params.no_context = true ;
     params.single_segment = false;
     //排除空白token
     params.suppress_blank = true;
     params.suppress_nst = true;
+    params.audio_ctx = 278 ;
     //解码与置信度阈值，防止幻觉
     params.temperature = 0.0f;
     params.temperature_inc = 0.2f;
