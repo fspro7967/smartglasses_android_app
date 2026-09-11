@@ -1,0 +1,21 @@
+{
+    // 复制本文件为 settings.json 后按自己的环境修改。
+    // settings.json 已被 .gitignore 忽略，因为它包含签名密钥口令等敏感信息。
+    "cmake.options.statusBarVisibility": "visible",
+    "cmake.buildDirectory": "${workspaceFolder}/builds/${buildKit}/${buildType}",
+    "cmake.configureSettings": {
+        "CMAKE_PREFIX_PATH": "/opt/Qt/<Qt版本>/android_arm64_v8a",
+        "QT_HOST_PATH": "/opt/Qt/<Qt版本>/gcc_64",
+        "CMAKE_TOOLCHAIN_FILE": "/opt/Qt/<Qt版本>/android_arm64_v8a/lib/cmake/Qt6/qt.toolchain.cmake",
+        "ANDROID_ABI": "arm64-v8a",
+        "ANDROID_PLATFORM": "android-28",
+        "ANDROID_NDK_ROOT": "<你的 Android SDK 路径>/ndk/<NDK 版本>",
+        "ANDROID_SDK_ROOT": "<你的 Android SDK 路径>",
+        "JAVA_HOME": "<你的 JDK 路径>",
+        "KEYSTORE": "${workspaceFolder}/android_release.keystore",
+        "STORE_PASS": "<keystore 口令，不要提交>",
+        "ALIAS": "<key alias>",
+        "KEY_PASS": "<key 口令，不要提交>"
+    },
+    "java.configuration.updateBuildConfiguration": "interactive"
+}
