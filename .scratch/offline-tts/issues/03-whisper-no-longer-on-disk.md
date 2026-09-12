@@ -16,3 +16,13 @@ Type: task
 并确认它不再被写入、也不影响功能。
 
 `转写` 仍工作 = 对着麦克风说英文能拿到识别文本。
+
+## Comments
+
+**2026-09-12（构建机）** — 未做，仍需要真机。
+
+静态侧已核对：`MainWindow::extractModelToFile()` 已从代码中消失（`grep` 只剩注释里
+的说明），`WhisperManager::init()` 走 `whisper_init_from_buffer_with_params()`，
+调用处传的是 `assets:/models/model.bin`。**没有任何路径会再写 `model.bin` 到
+`AppDataLocation`。** 判据要求的「不再出现 + 转写仍工作」仍需设备实测，
+尤其是「转写仍工作」这一半——从内存加载是本次唯一有功能风险的改动。

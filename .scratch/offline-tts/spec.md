@@ -255,6 +255,54 @@ whisper_init_from_buffer_with_params(void * buffer, size_t buffer_size,
 | 引擎淘汰与出处的完整依据 | `.scratch/offline-tts/offline-chinese-tts-comparison.md` |
 | 附带调研材料 | `.scratch/tts-research/`、`.scratch/research/`、`.scratch/piper-embedding-research.md` |
 | 本次同时发现的架构问题与缺陷清单 | 见 `/improve-codebase-architecture` 报告(临时目录,未入库) |
+
+---
+
+## 六、实测数据
+
+由工单 01 / 06 / 07 在 Linux 构建机上量得并回填。**这三项判据已闭合**;
+其余 [构建机] 判据（工单 02 / 03 / 04 / 05）仍需真机,状态见各工单文件。
+
+### 6.1 APK 体积增量（工单 07）
+
+| 项 | 字节 | MiB |
+|---|---:|---:|
+| 改动前（无 TTS） | 86,019,540 | 82.03 |
+| 改动后（含 TTS） | 132,887,802 | 126.73 |
+| **增量** | **+46,868,262** | **+44.70（+54.5%）** |
+
+两次构建同一工具链、同一 ABI、同一构建类型（Release，arm64-v8a，NDK 27.2.12479018）。
+实测增量约为按未压缩体积估算值（57.38 MB）的 0.78 倍。
+
+### 6.2 单元测试（工单 06）
+
+`tst_sentencesplitter` 在 host Qt（`/opt/Qt/6.11.1/gcc_64`）上 26/26 通过，0 失败。
+
+### 6.3 依赖与构建前置（工单 01、步骤 0）
+
+- Qt6Multimedia 六件套在 `android_arm64_v8a` 下齐全，且 `libQt6Multimedia_arm64-v8a.so`
+  确实进入 APK 的 `lib/arm64-v8a/`——工单 01 的「模块缺失会让 configure 阶段失败」
+  这一风险不复存在。
+- 步骤 0 的第 2 条结论要修正：标称「静态链接 ONNX Runtime」的产物只有 JNI 库，
+  因此改用**两个 .so** 的那份产物（这一判断已写进 `third_party/sherpa-onnx/README.md`
+  与 `sherpa-onnx.cmake` 顶部注释）。
+- `download-libs.sh` 有两处只有在 Linux 上才会暴露的问题，均已修复：
+  1. 归档成员名带 `./` 前缀，GNU tar 不像 bsdtar 那样自动等价匹配，原地报
+     「归档中找不到」，需写成 `"./jniLibs/<abi>/<file>"` 且 `--strip-components=3`；
+  2. release 资源实际由 `objects.githubusercontent.com` 提供，国内直连**一个字节都
+     下不来**；新增可选镜像前缀 `SHERPA_ONNX_MIRROR`（sha256 校验照旧执行）。
+
+### 6.4 合并状态
+
+实现分支 `feature/ai-text-to-speech` 已并入 `master`（合并提交 `886d05c`）。
+`master` 上的 **BLE 回写**功能与本规格的 TTS 功能同时存在——冲突只限
+`includes/mainwindow.h` 与 `src/mainwindow.cpp`（两者都动过同一批成员与 `onAIResponse`）。
+取舍：`onAIResponse()` 先走静默策略，再 BLE 回写，最后逐句朗读；静默返回同时跳过
+BLE 回写（空回复与 `[无识别结果]` 都没有下行价值）。
+
+注意：这使本规格第三节「刻意不做的事」里的**蓝牙下行与可写特征**事实上已由另一条
+工作线落地（早于 TTS 合并）。该节记载的「何时做」判断因此已过期，但留档不改——
+它是当时的决策记录。
 | 引擎/模型来源、校验和与选型理由 | `third_party/sherpa-onnx/README.md` |
 
 ---

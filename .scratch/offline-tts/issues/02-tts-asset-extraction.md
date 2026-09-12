@@ -17,3 +17,11 @@ kill -9），然后重启，检查 `AppDataLocation/tts-vits-icefall-zh-aishell3
 是否残留 `.tmp` 文件、以及应用是否重新完整提取而不是直接认为已就绪。
 
 目标目录形如 `/data/data/<包名>/files/tts-vits-icefall-zh-aishell3/`。
+
+## Comments
+
+**2026-09-12（构建机）** — 未做，仍需要真机。构建机侧能确认的前置条件已满足：
+`AssetExtractor::ensureExtracted()` 的四个要求（后台线程、1 MiB 分块、
+`.tmp` + rename、清单按字节长度校验）在代码中逐条可读，且 8 个模型文件确实
+随 APK 打包到 `assets/models/tts-vits-icefall-zh-aishell3/`（见工单 07）。
+判据本身（首次出现 / 二次跳过 / 杀进程不留半截）必须在设备上跑。

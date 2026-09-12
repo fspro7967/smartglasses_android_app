@@ -245,3 +245,56 @@ git checkout feature/ai-text-to-speech
 | 合成完全没声音 | 确认 `model.onnx`/`lexicon.txt`/`tokens.txt` 三个文件都被提取到了 `AppDataLocation` |
 
 代码里所有非显然的设计都写了「为什么」，搜索 `// 注意`、`// 刻意`、`// 为什么` 能找到它们。
+
+---
+
+## 9. 回执（2026-09-12，Linux 构建机）
+
+实施者请只读这一节；判据的原文与逐条结论在各工单文件的 `## Answer` 里。
+
+```
+环境：Qt 6.11.1 / NDK 27.2.12479018 / 设备型号 未连接（按用户要求不装机） / Android —
+
+1. Qt Multimedia 是否存在：是（六个 cmake 目录齐全，libQt6Multimedia_arm64-v8a.so 已进 APK）
+2. 音频日志那行原文：**未取到**——需要真机才能打印（工单 04 未闭合）
+3. 编译是否通过：是
+   仅 Qt QTP0002 策略警告 + NDK 工具链 cmake_minimum_required 弃用警告，与本改动无关
+4. 05 端到端：未做（「APK 构建通过」这一半已闭合）
+5. 06 ctest 结果：26 条通过 / 0 条失败（25 条用例 + init/cleanupTestCase）
+6. 07 APK 体积：改动前 82.03 MB (86,019,540 B) / 改动后 126.73 MB (132,887,802 B)
+   增量 +44.70 MB (+54.5%)
+7. 其他异常、崩溃、日志：无崩溃。见下方「对代码的修改」
+
+对代码的修改：有（见下方）
+```
+
+### 对代码的修改（都在构建机侧，均为「只有在 Linux 上才暴露」的问题）
+
+1. **`third_party/sherpa-onnx/download-libs.sh` 的解压步骤在 GNU tar 下必然失败。**
+   归档成员名带 `./` 前缀；bsdtar 会把 `jniLibs/x` 与 `./jniLibs/x` 视作同一路径，
+   GNU tar 不会，原地报「归档中找不到」。已改为显式 `"./jniLibs/<abi>/<file>"`
+   配 `--strip-components=3`，并把原因写进注释（防止后人「顺手清理」掉）。
+   这是原来 `--strip-components=2` 之外的第二处修正：前缀变了，剥离层数也变 3。
+
+2. **新增可选镜像前缀 `SHERPA_ONNX_MIRROR`。**
+   本机直连 `github.com/k2-fsa/.../releases/download/...` 时 curl 长时间**零字节**，
+   与文档里「只用代理」的说法不同——`github.com` 首页可达，但 release 资源实际由
+   `objects.githubusercontent.com` 提供，那条路不通。实测
+   `SHERPA_ONNX_MIRROR=https://ghfast.top` 可达 4.4–4.6 MB/s。sha256 校验照旧执行，
+   走镜像不降低安全性。
+
+### 另一个与原计划不同的决定：TTS 没有单独落地，而是并入了 `master`
+
+`master` 在 TTS 分支分出之后又加了一条 **BLE 回写**工作线（提交 `eb96649`、
+`8fffab2`）。若直接切到 `feature/ai-text-to-speech`，BLE 回写会从工作区消失。
+与仓库所有者确认后改为合并（合并提交 `886d05c`），两个功能共存。
+
+冲突只有两处，且都是「同一批成员/同一个函数被两边各自扩展」：
+
+- `includes/mainwindow.h`：属性、访问器、`Q_INVOKABLE`、信号、私有方法、成员变量
+  六段各自合并，两侧都保留；`extractModelToFile()` 按步骤 3 的结论删除（无调用方）。
+- `src/mainwindow.cpp` 的 `onAIResponse()`：顺序定为
+  **静默策略 → BLE 回写 → 逐句朗读**。静默返回同时跳过 BLE 回写——空回复与
+  `[无识别结果]` 都没有下行价值。
+
+因此第 3.2 节那个「采样率兜底要不要删」的问题依然成立且未决，仍需要真机的日志行。

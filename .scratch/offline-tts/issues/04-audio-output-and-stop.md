@@ -19,3 +19,14 @@ Type: task
    若听感上仍有残留，需要检查 `setBufferSize()` 设的 200 ms 缓冲。
 
 同时确认「重播」按钮能重放上一条回复，以及 TTS 未就绪时这两个按钮是禁用的。
+
+## Comments
+
+**2026-09-12（构建机）** — 未做，仍需要真机；两个不确定点都只能在设备上定。
+
+- 采样率问题**在构建机上无法预先判**：`QMediaDevices::defaultAudioOutput()` 的
+  能力取决于设备，桌面与 Android 的答案无关。日志行 `音频输出已打开 <rate> Hz
+  单声道 int16 重采样: <true|false>` 必须在真机上取。
+- 「停止」走 `reset()` 的取舍已在代码注释中固定；构建机只能确认它编译通过、
+  且 `QAudioSink` 相关头文件与 `Qt6::Multimedia` 链接无误。
+- 顺带确认：`libQt6Multimedia_arm64-v8a.so` 已进 APK，真机上不会因缺库而静默无声。
