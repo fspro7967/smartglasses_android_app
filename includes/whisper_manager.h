@@ -15,7 +15,16 @@ public:
     explicit WhisperManager(QObject *parent = nullptr);
     ~WhisperManager();
 
-    bool init(const QString &modelPath);
+    // 从 assets 中的模型文件加载（例如 "assets:/models/model.bin"）。
+    //
+    // 内容整块读进内存后交给 whisper_init_from_buffer_with_params，**不再解压到
+    // 磁盘**：省掉首次运行 59.7 MB 的写入和一份重复存储，并从根上消除「进程被杀
+    // 留下的半截文件被当成有效模型」的风险。
+    //
+    // 注意：whisper 在 init 调用期间就同步读完所有权重（其内部 loader 的
+    // buf_context 分配在栈上），所以读入的 QByteArray 在返回后即可释放。
+    // 峰值内存约为「模型字节数 × 2」的瞬时占用，初始化完成后回落。
+    bool init(const QString &modelAssetPath);
     void feedAudioData(const int16_t *data, size_t sampleCount);
     void processAudioFile(const QString &filePath);
     void reset();

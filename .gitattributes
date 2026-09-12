@@ -1,0 +1,23 @@
+# 行尾策略。
+#
+# 背景：开发机（Windows）全局配置了 core.autocrlf=true，而仓库此前没有
+# .gitattributes，于是 git 会在**检出时**把 LF 换成 CRLF。这对本项目有两个
+# 真实危害，都不是风格问题：
+#
+#   1. assets 里的 TTS 模型文本文件（lexicon.txt / tokens.txt / speakers.txt）
+#      由 sherpa-onnx 在运行时逐行解析。行尾多出的 \r 会污染词条与音素表；
+#      模型是随 APK 打包的，所以这会让真机上的合成质量变差且难以归因。
+#   2. *.sh 脚本若带 CRLF，在 Linux 构建机上 shebang 解析失败，直接跑不起来。
+#
+# 因此这里显式钉死行尾，不依赖任何人的本地配置。
+
+# 模型目录整体不做任何行尾转换。
+# 里面有 .onnx 与 .fst 二进制文件：一旦被当作文本转换就可能损坏；
+# 同一目录下的文本文件也要求字节稳定（见上第 1 条）。
+android/assets/models/** -text
+
+# 第三方 C API 头文件保持原始字节（取自 sherpa-onnx 源码 tag v1.13.7）。
+third_party/sherpa-onnx/include/** -text
+
+# Shell 脚本一律 LF。
+*.sh text eol=lf

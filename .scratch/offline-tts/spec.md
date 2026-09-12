@@ -25,8 +25,8 @@
 |---|---|
 | 首版出声位置 | **手机扬声器**。不碰蓝牙 |
 | 引擎 | **sherpa-onnx** + **`vits-icefall-zh-aishell3`** |
-| 模型 | 30 MB,8 kHz 单声道 |
-| 链接方式 | **静态链接 ONNX Runtime** 的构建产物(34.3 MB tar.bz2,单个 `.so`) |
+| 模型 | `model.onnx` 29.07 MB；**vendored 后 31.24 MB**（见下方「实施期修订」） |
+| 链接方式 | ~~静态链接 ONNX Runtime 的构建产物(34.3 MB tar.bz2,单个 `.so`)~~ → **非静态 `android.tar.bz2` 的两个 `.so`**（见下方「实施期修订」） |
 | API | 纯 C API(`libsherpa-onnx-c-api.so`),**不引入 JNI** |
 | 合成粒度 | **逐句**。按 `。！？；…` 与换行切分,设最小长度阈值,**不在数字中间切** |
 | 播放 | `应答` 到达**自动朗读**;提供**停止/重播** |
@@ -36,6 +36,39 @@
 | 模型打包 | 后台线程、分块复制、`.tmp` + rename、按字节长度校验、文件名带模型标识 |
 | whisper 模型 | 改用 `whisper_init_from_buffer_with_params`,**不再解压到磁盘** |
 | 授权 | 个人使用 | 
+
+### 实施期修订（2026-09-12）
+
+以下三条是在实施步骤 0 核实实物后**必须**改的，原决策在 v1.13.7 的已发布产物里不成立：
+
+1. **链接方式：静态 → 非静态。** 标称「静态链接 ONNX Runtime」的产物
+   （`sherpa-onnx-v1.13.7-android-static-link-onnxruntime.tar.bz2`，34.3 MB，
+   字节数与原决策完全一致）里**只有 `libsherpa-onnx-jni.so`**，没有 C API 库。
+   已对 289 个 release 资产逐个核实：**唯一含 `libsherpa-onnx-c-api.so` 的是非静态的
+   `sherpa-onnx-v1.13.7-android.tar.bz2`（45.2 MB）**。
+   即「静态链接」与「纯 C API、不引入 JNI」在已发布产物里互斥。
+   本仓库是纯 C++、零 Java、无 gradle 文件，引入 JNI 是架构级改动；而放弃静态链接
+   只多 2.38 MB（24.93 MB vs 22.55 MB）。**保住不引入 JNI，放弃单个 `.so`。**
+   如将来确实需要单个 `.so`，须在构建机上从源码构建
+   （`-DSHERPA_ONNX_ENABLE_C_API=ON -DBUILD_SHARED_LIBS=ON` + 静态 ONNX Runtime）。
+
+2. **模型：30 MB → 31.24 MB（剔除 `rule.far`）。** 官方归档解压后其实是
+   **203.59 MB**，其中 `rule.far` 一个文件占 **172.3 MB**。但官方文档对该模型只传
+   `--tts-rule-fsts=phone.fst,date.fst,number.fst`，**从不引用 `rule.far`**；
+   C API 里 `rule_fsts` 与 `rule_fars` 也是两个独立字段，本项目只用前者。
+   剔除 `rule.far` 后正好是原决策写的「30 MB」，说明原决策的意图就是不含它的形态。
+
+3. **新增重采样兜底（原决策未涉及）。** `QAudioSink` **不做**采样率转换，
+   格式不被设备支持就是没声音；Android 原生输出通常是 48 kHz，而
+   `QAudioDevice::isFormatSupported()` 未必认 8 kHz——那会让步骤 6 的「能听到声音」
+   判据直接不成立。因此 `setupAudioOutput()` 在 8 kHz 不被支持时退回设备采样率，
+   由 `mainwindow.cpp` 里的 `resampleLinearLe()` 补一次线性插值转换。
+   这是实施期新增的代码，不是原决策的一部分。
+
+另外，原决策里的 `.so` 打包方式明确为：**预编译 `.so` 不入版本库**
+（`.gitignore` 全局排除 `*.so`），由 `third_party/sherpa-onnx/download-libs.sh`
+在构建机上拉取并校验 sha256；**模型入库**（与既有 whisper `model.bin` 的做法一致）。
+
 
 **为什么不选其他引擎** —— 完整的十五个候选逐条淘汰与出处见
 `.scratch/offline-tts/offline-chinese-tts-comparison.md`。实施时不必重读,除非要换引擎。
@@ -205,11 +238,13 @@ whisper_init_from_buffer_with_params(void * buffer, size_t buffer_size,
 | 风险 | 状态 |
 |---|---|
 | **没有任何 Android arm64 的实测 RTF** | 所有公开数字都是 x86 或树莓派 4。性能要等真机 |
-| Android tarball 是否真含非 JNI 的 C API 库 | 仅官方构建脚本 README 声明,**步骤 0 会核实** |
-| Qt Multimedia 是否已安装 | 本机无法验证,**步骤 0 会确认** |
-| 本仓库在此机器编译不了 | 所有 **[构建机]** 判据需在 Linux/Android 环境执行 |
+| Android tarball 是否真含非 JNI 的 C API 库 | ✅ **已核实：静态版不含**，只有 JNI 库；改用非静态版（见「实施期修订」1） |
+| Qt Multimedia 是否已安装 | ⚠️ **仍未验证**。实施本机无 Qt，无法确认；构建机需检查 `/opt/Qt/6.11.1/android_arm64_v8a/lib/cmake/Qt6Multimedia` |
+| 本仓库在此机器编译不了 | ✅ 已确认（无 Qt / 无 CMake / 无 C++ 编译器），所有 **[静态]** 判据已在此机完成，**[构建机]** 判据待跑 |
 | `.ts` 翻译目录是空的 | `qsTr()` 与 `tr()` 目前全是空操作(见 `smartglasses_android_app_zh_CN.ts`)。新增字符串沿用现有做法即可,不要以为现有的 i18n 是生效的 |
-| 仓库不是 git 仓库 | 改动前先 `git init`,否则无法 diff、无法回退 |
+| ~~仓库不是 git 仓库~~ | ✅ 已是 git 仓库。实施前已存快照 tag `snapshot/pre-tts-implementation`(→`5d21a03`),改动在分支 `feature/ai-text-to-speech` 上进行 |
+| QAudioSink 是否接受 8 kHz | ⚠️ 未知。`QAudioSink` 不做重采样，已加线性插值兜底（见「实施期修订」3），但真机上仍需确认走的是哪条路径 |
+| whisper 初始化仍在构造函数里 | ⚠️ 已知。步骤 3 只去掉了解压，`whisper_init_from_buffer_with_params` 同步解析 57 MB 模型仍在 `MainWindow` 构造函数中，会拖慢首屏。规格未要求改，故未改 |
 
 ---
 
@@ -220,3 +255,65 @@ whisper_init_from_buffer_with_params(void * buffer, size_t buffer_size,
 | 引擎淘汰与出处的完整依据 | `.scratch/offline-tts/offline-chinese-tts-comparison.md` |
 | 附带调研材料 | `.scratch/tts-research/`、`.scratch/research/`、`.scratch/piper-embedding-research.md` |
 | 本次同时发现的架构问题与缺陷清单 | 见 `/improve-codebase-architecture` 报告(临时目录,未入库) |
+| 引擎/模型来源、校验和与选型理由 | `third_party/sherpa-onnx/README.md` |
+
+---
+
+## 六、实施状态（2026-09-12）
+
+分支 `feature/ai-text-to-speech`，改动前已存快照 tag `snapshot/pre-tts-implementation`。
+
+### 已完成的 [静态] 判据
+
+| 步骤 | 产物 | 判据 |
+|---|---|---|
+| 0 | 两个归档 + `c-api.h` 下载完成 | ✅ 字节数与 sha256 逐一核对；**发现静态版无 C API 库**，已报告并由所有者选定非静态方案 |
+| 1 | `third_party/sherpa-onnx/`、`android/assets/models/tts-vits-icefall-zh-aishell3/` | ✅ CMake 中出现 include 与链接；模型就位；APK 体积见下 |
+| 2 | `includes/assetextractor.h`、`src/assetextractor.cpp` | ✅ 后台线程、1 MiB 分块、`.tmp`+rename、字节长度校验、清单最后写 |
+| 3 | `whisper_manager.cpp` 改 `whisper_init_from_buffer_with_params` | ✅ 已核实该函数不保留调用方 buffer（内部 `buf_context` 在栈上），故 init 后即可释放 |
+| 4 | `includes/speechsynthesizer.h`、`src/speechsynthesizer.cpp` | ✅ 每个成员都有调用方；正常路径不发 `failed` |
+| 5 | `includes/sentencesplitter.h`、`src/sentencesplitter.cpp`、`tests/` | ✅ 纯自由函数；**新增本仓库第一个可离线运行的单元测试** |
+| 6 | `Qt6::Multimedia` + `QAudioSink` | ✅ 代码就位（含采样率兜底）；**能否出声待真机** |
+| 7 | `onAIResponse` 三条静默路径 | ✅ 逐条走查，均不会到达 `speakReply()` |
+| 9 | `whisper_manager.cpp` 语言不对称注释 | ✅ 已注明为何是 `en` 而非 `zh`/`auto` |
+
+### APK 体积增量
+
+本机无法产出 APK，故给出**可计算的等价数字**（未压缩）：
+
+| 项 | 体积 |
+|---|---:|
+| `libsherpa-onnx-c-api.so` | 4.46 MB |
+| `libonnxruntime.so` | 21.68 MB |
+| TTS 模型（assets，剔除 `rule.far`） | 31.24 MB |
+| **合计增量** | **57.38 MB** |
+
+真实 APK 增量需在构建机上量（`assets` 与 `lib` 在 APK 内的压缩率不同，且
+移除 whisper 落盘不影响 APK 体积）。**这是步骤 1 判据中尚未闭合的一项。**
+
+### 超出原步骤清单的改动（如实记录）
+
+以下几项不在 spec 的步骤 0–9 里，是实施时判断必要性后加入的：
+
+| 改动 | 为什么加 |
+|---|---|
+| 新增 `.gitattributes` | 开发机全局 `core.autocrlf=true` 会把 sherpa 逐行解析的 `lexicon.txt`/`tokens.txt` 检出成 CRLF，也会破坏 `*.sh` 的 shebang——不加会静默损坏功能 |
+| 新增 `tests/` 与根 `include(CTest)` | 步骤 5 只说「值得为此写测试」，这里把它落成可运行的 cmake 目标；该目标只在非 Android 构建生成，APK 不受影响 |
+| 删除 `MainWindow::extractModelToFile()` | 步骤 2 说「不要改」它，但步骤 3 之后它已无调用方。留着就是死代码，且它「文件存在即有效」的判定正是规格点名要修的缺陷 |
+| MainWindow 侧排空定时器 + 低水位背压 + 4 MiB 安全阀 | 规格只要求「PCM 队列设上限」。但合成比播放快约 6 倍：若只在收到音频块时才写设备，尾部音频永远写不出去（短回复**只听到开头**），长回复则堆到上限并谎报「音频输出停滞」。背压把上限还原成真正的安全阀；排空定时器则保证合成停下来之后积压仍能被写完 |
+| 设备无响应检测（`kStalledTicksBeforeGivingUp`） | 背压闸门引入的新失败模式：设备卡住 → 积压不涨 → 安全阀永不触发 → 合成与播放双双静止、界面永远停在「正在朗读」。必须有个出口 |
+| `SpeechSynthesizer` 的按代次取消（`m_cancelUpTo`） | 规格只要求「提供停止/重播」。若用单一取消标志，`stop()` 之后立刻开始下一句会让上一句的 worker 复活 |
+| `resampleLinearLe()` | 见「实施期修订」3：不加则设备不认 8 kHz 时直接无声 |
+
+### 尚未完成的 [构建机] 判据
+
+以下 7 项已按 `docs/agents/issue-tracker.md` 的约定建为工单，
+逐条可跟踪：`.scratch/offline-tts/issues/01-…07`（`Status: ready-for-human`）。
+
+1. 步骤 0 之二：确认 Qt 6.11.1 Android 套件含 Multimedia 模块 → `issues/01`
+2. 步骤 2：首次启动后目标文件出现；第二次启动不重复复制；**手工杀进程不留半截文件** → `issues/02`
+3. 步骤 3：`AppDataLocation` 下**不再出现** whisper 模型文件，且转写仍工作 → `issues/03`
+4. 步骤 6：能听到声音；长回复播放途中「停止」立即生效 → `issues/04`
+5. 步骤 8：端到端——说一句英文，得到中文回复**并被朗读出来** → `issues/05`
+6. 跑 `ctest --test-dir build-tests`（`tests/tst_sentencesplitter.cpp` 的 25 条用例） → `issues/06`
+7. 记录真实 APK 体积增量 → `issues/07`
