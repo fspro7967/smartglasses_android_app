@@ -1,10 +1,13 @@
 #include "devicehandler.h"
 #include <QDebug>
+#include <QTimer>
+#include <QBluetoothUuid>
 
 DeviceHandler::DeviceHandler(QObject *parent)
     : QObject(parent)
     , m_discoveryAgent(new QBluetoothDeviceDiscoveryAgent(this))
     , m_controller(nullptr)
+    , m_writeTimer(new QTimer(this))
 {
     connect(m_discoveryAgent, &QBluetoothDeviceDiscoveryAgent::deviceDiscovered,
             this, &DeviceHandler::onDeviceDiscovered);
@@ -12,6 +15,10 @@ DeviceHandler::DeviceHandler(QObject *parent)
             this, &DeviceHandler::onScanError);
     connect(m_discoveryAgent, &QBluetoothDeviceDiscoveryAgent::finished,
             this, &DeviceHandler::scanFinished);
+
+    // 无响应写入模式的发包节拍：连续快速写入可能被蓝牙栈丢弃，逐包间隔发送更可靠
+    m_writeTimer->setInterval(15);
+    connect(m_writeTimer, &QTimer::timeout, this, &DeviceHandler::onWriteTimerTimeout);
 }
 
 DeviceHandler::~DeviceHandler()
@@ -81,6 +88,11 @@ void DeviceHandler::disconnectDevice()
     m_activeService = nullptr;
     m_activeCharacteristic = QLowEnergyCharacteristic();
 
+    // 清空下行写入状态（待发送队列、定时器、写入目标）
+    clearWriteQueue();
+    m_writeService = nullptr;
+    m_writeCharacteristic = QLowEnergyCharacteristic();
+
     // 删除所有服务对象
     qDeleteAll(m_services);
     m_services.clear();
@@ -141,6 +153,139 @@ void DeviceHandler::enableCharacteristicNotification(const QString &serviceUuid,
     }
 }
 
+// ---------- 下行写入（AI 回复等 → 眼镜） ----------
+bool DeviceHandler::setWriteTarget(const QString &serviceUuid, const QString &charUuid)
+{
+    // 切换目标时清空尚未发送的队列，避免写入旧特征
+    clearWriteQueue();
+
+    QLowEnergyService *service = findService(serviceUuid);
+    if (!service) {
+        m_writeService = nullptr;
+        m_writeCharacteristic = QLowEnergyCharacteristic();
+        emit writeError("写入目标服务不存在: " + serviceUuid);
+        return false;
+    }
+
+    const QLowEnergyCharacteristic ch = service->characteristic(QBluetoothUuid(charUuid));
+    if (!ch.isValid()) {
+        m_writeService = nullptr;
+        m_writeCharacteristic = QLowEnergyCharacteristic();
+        emit writeError("写入目标特征不存在: " + charUuid);
+        return false;
+    }
+    if (!(ch.properties() & (QLowEnergyCharacteristic::Write
+                             | QLowEnergyCharacteristic::WriteNoResponse))) {
+        m_writeService = nullptr;
+        m_writeCharacteristic = QLowEnergyCharacteristic();
+        emit writeError("该特征不可写: " + charUuid);
+        return false;
+    }
+
+    m_writeService = service;
+    m_writeCharacteristic = ch;
+    // 优先使用无响应写入（更快）；仅支持有响应写入的特征回退到 WriteWithResponse
+    m_writeMode = (ch.properties() & QLowEnergyCharacteristic::WriteNoResponse)
+            ? QLowEnergyService::WriteWithoutResponse
+            : QLowEnergyService::WriteWithResponse;
+
+    emit statusChanged("写入目标已设置: " + charUuid);
+    return true;
+}
+
+void DeviceHandler::writeData(const QByteArray &data)
+{
+    if (!m_writeService || !m_writeCharacteristic.isValid()) {
+        emit writeError("未设置写入目标，无法发送数据");
+        return;
+    }
+    if (!m_writeQueue.isEmpty()) {
+        emit writeError("正在发送上一条数据，请稍候");
+        return;
+    }
+    if (data.isEmpty()) {
+        emit writeError("发送内容为空");
+        return;
+    }
+
+    // 分包大小取决于协商后的 ATT MTU（MTU - 3 字节 ATT 头），未知时按默认 23 字节 MTU 处理
+    int chunkSize = 20;
+    if (m_controller) {
+        const int mtu = m_controller->mtu();
+        if (mtu > 3)
+            chunkSize = mtu - 3;
+    }
+
+    m_writeQueue.clear();
+    for (int i = 0; i < data.size(); i += chunkSize)
+        m_writeQueue.append(data.mid(i, chunkSize));
+
+    qDebug() << "DeviceHandler::writeData" << data.size() << "bytes ->"
+             << m_writeQueue.size() << "chunks, chunkSize =" << chunkSize;
+
+    sendNextWriteChunk();
+}
+
+void DeviceHandler::sendNextWriteChunk()
+{
+    if (m_writeQueue.isEmpty()) {
+        m_writeTimer->stop();
+        emit writeFinished();
+        return;
+    }
+
+    const QByteArray chunk = m_writeQueue.takeFirst();
+    m_writeService->writeCharacteristic(m_writeCharacteristic, chunk, m_writeMode);
+
+    if (m_writeMode == QLowEnergyService::WriteWithoutResponse) {
+        // 无响应模式没有完成回调，由定时器按节拍继续发送剩余分片；
+        // 若队列已空，停止定时器并立即收尾，避免重复触发 writeFinished
+        if (!m_writeQueue.isEmpty()) {
+            m_writeTimer->start();
+        } else {
+            m_writeTimer->stop();
+            emit writeFinished();
+        }
+    }
+    // WriteWithResponse 模式：等待 characteristicWritten 确认后再发下一包
+}
+
+void DeviceHandler::clearWriteQueue()
+{
+    m_writeTimer->stop();
+    m_writeQueue.clear();
+}
+
+void DeviceHandler::onWriteTimerTimeout()
+{
+    sendNextWriteChunk();
+}
+
+void DeviceHandler::onCharacteristicWritten(const QLowEnergyCharacteristic &c,
+                                            const QByteArray &value)
+{
+    Q_UNUSED(value);
+    if (m_writeMode != QLowEnergyService::WriteWithResponse)
+        return;
+    if (!m_writeCharacteristic.isValid() || c.uuid() != m_writeCharacteristic.uuid())
+        return;
+    if (m_writeQueue.isEmpty())
+        return;
+    sendNextWriteChunk();
+}
+
+void DeviceHandler::onServiceError(QLowEnergyService::ServiceError error)
+{
+    // 仅在正在向下行目标写入时报错（其他读/写/描述符操作不归本模块管）
+    if (m_writeService != qobject_cast<QLowEnergyService*>(sender()))
+        return;
+    if (m_writeQueue.isEmpty())
+        return;
+
+    clearWriteQueue();
+    emit writeError("特征写入失败，错误码: " + QString::number(int(error)));
+}
+
 // ---------- 扫描槽 ----------
 void DeviceHandler::onDeviceDiscovered(const QBluetoothDeviceInfo &info)
 {
@@ -170,6 +315,10 @@ void DeviceHandler::onServiceDiscovered(const QBluetoothUuid &newService)
             this, &DeviceHandler::onServiceStateChanged);
     connect(service, &QLowEnergyService::characteristicChanged,
             this, &DeviceHandler::onCharacteristicChanged);
+    connect(service, &QLowEnergyService::characteristicWritten,
+            this, &DeviceHandler::onCharacteristicWritten);
+    connect(service, &QLowEnergyService::errorOccurred,
+            this, &DeviceHandler::onServiceError);
 
     service->discoverDetails();
     emit serviceDiscovered(newService.toString());

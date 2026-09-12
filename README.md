@@ -24,7 +24,7 @@ __MAKE SURE THAT EVERYTHING WORK WELL IN QT CREATOR__, it can save a lot of effo
 APK built in release mode is recommended since we enable optimization in processing speed and accuracy.
 ## Todo
 - ~~ Upload the ASR results to our AI model and get its response via Ollama API ~~
-- Send the AI response to the bluetooth device.
+- ~~ Send the AI response to the bluetooth device ~~
 - (Maybe)Integrate a simple model on mobile phone to anwser some simple questions when offline, and improve the responding speed.
 -  ~~ Improve the GUI, rebuild the app with QML ~~
 

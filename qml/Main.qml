@@ -352,16 +352,19 @@ ApplicationWindow {
 
         // ---- 服务/特征列表（数据由 C++ 端 backend.services 提供） ----
         Rectangle {
+            id: servicesCard
             visible: backend.services.length > 0
             Layout.fillWidth: true
             Layout.preferredHeight: servicesExpanded
-                ? serviceHeaderH + Math.min(serviceContent.contentHeight, 200)
-                : serviceHeaderH
+                ? serviceHeaderH + serviceStatusH + Math.min(serviceContent.contentHeight, 200)
+                : serviceHeaderH + serviceStatusH
             radius: 12
             color: cCard
             border.color: cBorder
 
             readonly property int serviceHeaderH: 36
+            // 写入目标状态行高度：连接中（有或没有输出目标）时显示一行提示
+            readonly property int serviceStatusH: (backend.writeTarget !== "" || backend.connected) ? 26 : 0
 
             ColumnLayout {
                 anchors.fill: parent
@@ -391,6 +394,32 @@ ApplicationWindow {
                             color: cSubText
                             font.pixelSize: 12
                         }
+                    }
+                }
+
+                // ---- 输出目标状态行：展示/引导设置 AI 回复的 BLE 写入目标 ----
+                RowLayout {
+                    visible: servicesCard.serviceStatusH > 0
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 26
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 8
+                    spacing: 6
+                    Text {
+                        visible: backend.writeTarget !== ""
+                        text: qsTr("AI 回复输出: ") + backend.writeTargetName
+                        color: cGreen
+                        font.pixelSize: 11
+                        elide: Text.ElideMiddle
+                        Layout.fillWidth: true
+                    }
+                    Text {
+                        visible: backend.writeTarget === ""
+                        text: qsTr("点击带“写”属性的特征，可将 AI 回复发回眼镜")
+                        color: cSubText
+                        font.pixelSize: 11
+                        elide: Text.ElideMiddle
+                        Layout.fillWidth: true
                     }
                 }
 
@@ -432,15 +461,28 @@ ApplicationWindow {
                         Repeater {
                             model: modelData.chars
                             delegate: Rectangle {
+                                id: charRow
                                 width: parent.width
                                 height: 44
-                                color: mouse.containsMouse ? "#1E2532" : "transparent"
+                                // 当前输出目标高亮；否则悬停时轻微提亮
+                                color: charRow.isWriteTarget ? "#14233D"
+                                     : (mouse.containsMouse ? "#1E2532" : "transparent")
                                 radius: 8
+                                border.color: charRow.isWriteTarget ? cAccent : "transparent"
+                                border.width: 1
+
+                                // 是否为当前 AI 回复输出目标（可写特征）
+                                readonly property bool isWriteTarget:
+                                    backend.writeTarget === modelData.serviceUuid + ":" + modelData.charUuid
+
                                 MouseArea {
                                     id: mouse
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     onClicked: {
+                                        // 可写特征 → 设为输出目标；可通知特征 → 启用音频通知（可同时生效）
+                                        if (modelData.writable)
+                                            backend.setWriteTarget(modelData.serviceUuid, modelData.charUuid)
                                         if (modelData.notifiable)
                                             backend.enableNotification(modelData.serviceUuid, modelData.charUuid)
                                     }
@@ -468,11 +510,27 @@ ApplicationWindow {
                                             Layout.fillWidth: true
                                         }
                                     }
-                                    Text {
-                                        visible: modelData.notifiable
-                                        text: qsTr("启用通知")
-                                        color: cAccent
-                                        font.pixelSize: 11
+                                    Row {
+                                        spacing: 8
+                                        Text {
+                                            visible: modelData.notifiable
+                                            text: qsTr("通知")
+                                            color: cSubText
+                                            font.pixelSize: 11
+                                        }
+                                        Text {
+                                            visible: charRow.isWriteTarget
+                                            text: qsTr("输出目标")
+                                            color: cGreen
+                                            font.pixelSize: 11
+                                            font.bold: true
+                                        }
+                                        Text {
+                                            visible: modelData.writable && !charRow.isWriteTarget
+                                            text: qsTr("设为输出")
+                                            color: cAccent
+                                            font.pixelSize: 11
+                                        }
                                     }
                                 }
                             }

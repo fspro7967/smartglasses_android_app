@@ -24,11 +24,20 @@ MainWindow::MainWindow(QObject *parent)
     connect(m_deviceHandler, &DeviceHandler::statusChanged, this, &MainWindow::statusMessage);
     connect(m_deviceHandler, &DeviceHandler::dataReceived, this, &MainWindow::onDataReceived);
 
+    // BLE 下行写入结果转发至状态栏
+    connect(m_deviceHandler, &DeviceHandler::writeFinished, this, [this]() {
+        emit statusMessage("AI 回复已通过蓝牙发送到眼镜");
+    });
+    connect(m_deviceHandler, &DeviceHandler::writeError, this, [this](const QString &err) {
+        emit statusMessage("蓝牙写入失败: " + err);
+    });
+
     connect(m_deviceHandler, &DeviceHandler::connected, this, [this]() {
         m_isConnected = true;
         m_deviceName = m_pendingDeviceName;
         emit connectionChanged();
         clearServices();
+        clearWriteTarget();   // 新设备连接后写入目标失效，需重新选择
         emit statusMessage("已连接设备: " + m_deviceName);
     });
     connect(m_deviceHandler, &DeviceHandler::disconnected, this, [this]() {
@@ -36,6 +45,7 @@ MainWindow::MainWindow(QObject *parent)
         m_deviceName.clear();
         emit connectionChanged();
         clearServices();
+        clearWriteTarget();
         emit statusMessage("连接已断开");
     });
     connect(m_deviceHandler, &DeviceHandler::scanFinished, this, [this]() {
@@ -90,6 +100,7 @@ void MainWindow::connectToDevice(int index)
     if (index >= 0 && index < m_discoveredDevices.size()) {
         const QBluetoothDeviceInfo &info = m_discoveredDevices.at(index);
         m_pendingDeviceName = info.name().isEmpty() ? info.address().toString() : info.name();
+        clearWriteTarget();   // 切换到新设备，旧的写入目标随之失效
         m_deviceHandler->connectToDevice(info);
     }
 }
@@ -102,7 +113,30 @@ void MainWindow::disconnectDevice()
     m_deviceName.clear();
     emit connectionChanged();
     clearServices();
+    clearWriteTarget();
     emit statusMessage("正在断开连接...");
+}
+
+// 设置 AI 回复的 BLE 写入目标（转发给 DeviceHandler，仅在其接受后更新 UI 状态）
+void MainWindow::setWriteTarget(const QString &serviceUuid, const QString &charUuid)
+{
+    if (m_deviceHandler->setWriteTarget(serviceUuid, charUuid)) {
+        m_writeServiceUuid = serviceUuid;
+        m_writeCharUuid = charUuid;
+    } else {
+        m_writeServiceUuid.clear();
+        m_writeCharUuid.clear();
+    }
+    emit writeTargetChanged();
+}
+
+void MainWindow::clearWriteTarget()
+{
+    if (m_writeServiceUuid.isEmpty() && m_writeCharUuid.isEmpty())
+        return;
+    m_writeServiceUuid.clear();
+    m_writeCharUuid.clear();
+    emit writeTargetChanged();
 }
 
 void MainWindow::enableNotification(const QString &serviceUuid, const QString &charUuid)
@@ -227,6 +261,7 @@ void MainWindow::onCharacteristicDiscovered(const QString &serviceUuid,
             QStringList propsList;
             if (properties & QLowEnergyCharacteristic::Read) propsList << tr("读");
             if (properties & QLowEnergyCharacteristic::Write) propsList << tr("写");
+            if (properties & QLowEnergyCharacteristic::WriteNoResponse) propsList << tr("写(无响应)");
             if (properties & QLowEnergyCharacteristic::Notify) propsList << tr("通知");
             if (properties & QLowEnergyCharacteristic::Indicate) propsList << tr("指示");
 
@@ -238,6 +273,9 @@ void MainWindow::onCharacteristicDiscovered(const QString &serviceUuid,
             ch.insert("props", propsList.join(" · "));
             ch.insert("notifiable", (properties & QLowEnergyCharacteristic::Notify)
                                      || (properties & QLowEnergyCharacteristic::Indicate));
+            // 可写特征可作为 AI 回复的下行输出目标
+            ch.insert("writable", bool(properties & (QLowEnergyCharacteristic::Write
+                                                     | QLowEnergyCharacteristic::WriteNoResponse)));
             chars.append(ch);
             service.insert("chars", chars);
             m_services.replace(i, service);
@@ -304,6 +342,13 @@ void MainWindow::onTranscriptionResult(const QString &text)
 void MainWindow::onAIResponse(const QString &response)
 {
     emit aiResponseReady(response);
+
+    // 把 AI 回复通过 BLE 写回眼镜（需先在服务列表中选择可写特征作为输出目标）
+    if (!m_writeServiceUuid.isEmpty() && !m_writeCharUuid.isEmpty()) {
+        m_deviceHandler->writeData(response.toUtf8());
+    } else {
+        emit statusMessage("未设置 BLE 输出目标，AI 回复仅显示在界面");
+    }
 }
 
 void MainWindow::onWhisperError(const QString &error)
