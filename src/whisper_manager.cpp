@@ -21,14 +21,34 @@ WhisperManager::~WhisperManager()
     }
 }
 
-bool WhisperManager::init(const QString &modelPath)
+bool WhisperManager::init(const QString &modelAssetPath)
 {
-    m_ctx = whisper_init_from_file(modelPath.toUtf8().constData());
-    if (!m_ctx) {
-        emit errorOccurred("加载模型失败: " + modelPath);
+    QFile modelFile(modelAssetPath);
+    if (!modelFile.open(QIODevice::ReadOnly)) {
+        emit errorOccurred("无法读取模型文件: " + modelAssetPath);
         return false;
     }
-    qDebug() << "Whisper 模型加载成功";
+
+    // 整块读入内存后直接初始化，不再写盘。whisper 在下面的调用期间同步读完
+    // 所有权重，所以这个 QByteArray 出了作用域就能释放掉——不再有一份 59.7 MB
+    // 的模型常驻在 AppDataLocation 里。
+    QByteArray modelData = modelFile.readAll();
+    modelFile.close();
+
+    if (modelData.isEmpty()) {
+        emit errorOccurred("模型文件为空: " + modelAssetPath);
+        return false;
+    }
+
+    whisper_context_params params = whisper_context_default_params();
+    m_ctx = whisper_init_from_buffer_with_params(modelData.data(),
+                                                 static_cast<size_t>(modelData.size()),
+                                                 params);
+    if (!m_ctx) {
+        emit errorOccurred("加载模型失败: " + modelAssetPath);
+        return false;
+    }
+    qDebug() << "Whisper 模型从内存加载成功，字节数" << modelData.size();
     return true;
 }
 
@@ -85,6 +105,15 @@ void WhisperManager::processBuffer(const std::vector<float> &audioChunk)
     params.print_timestamps = false;
     params.print_special = false;
     params.translate = false;
+    // **刻意写死 "en"，不要"顺手修"成 "zh" 或 "auto"。**
+    //
+    // 这是一处有意为之的语言不对称：使用者说英文，而 whisper 的英文识别率明显
+    // 高于中文；回复之所以是中文，不由这里决定，而是由 msgsender.cpp 的中文
+    // system prompt 决定（API 路径见 msgsender.cpp:88，Ollama 路径见 :151，
+    // 两处都是「你是智能眼镜上的语音助手，回答请简洁、口语化。」）。
+    //
+    // 即：输入英文 → whisper 转写成英文 → 大模型按中文 system prompt 回中文 →
+    // 朗读中文。改动这一行会让转写质量下降，而原因不会在报错里出现。
     params.language = "en";
     params.offset_ms = 0;
     params.no_context = true ;

@@ -17,7 +17,8 @@ endif()
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Quick Qml)
 
-find_package(Qt6 REQUIRED COMPONENTS Quick Qml Bluetooth Concurrent Network)
+# Multimedia 用于 QAudioSink：把 TTS 合成出的 PCM 推到手机扬声器。
+find_package(Qt6 REQUIRED COMPONENTS Quick Qml Bluetooth Concurrent Network Multimedia)
 
 # QTP0001 NEW：QML 模块资源前缀使用 /qt/qml（默认 QML 导入路径）。
 # OLD 行为（资源放在 :/SmartGlasses/）在 Qt 6.11 上找不到 qmldir，
@@ -95,6 +96,7 @@ target_link_libraries(smartglasses_android_app PRIVATE
     Qt${QT_VERSION_MAJOR}::Bluetooth
     Qt${QT_VERSION_MAJOR}::Concurrent
     Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Multimedia    # QAudioSink：TTS 播放
     whisper                              # 链接 whisper 库
 )
 
@@ -107,6 +109,12 @@ target_include_directories(smartglasses_android_app PRIVATE
 if (ANDROID)
     include(${CMAKE_CURRENT_SOURCE_DIR}/third_party/android_openssl/android_openssl.cmake)
     add_android_openssl_libraries(smartglasses_android_app)
+
+    # 离线中文 TTS：sherpa-onnx 的纯 C API 库 + 其 ONNX Runtime 依赖。
+    # 这两个 .so 不入版本库，构建前需先跑 third_party/sherpa-onnx/download-libs.sh，
+    # 缺失时 sherpa-onnx.cmake 会给出明确的 FATAL_ERROR。
+    include(${CMAKE_CURRENT_SOURCE_DIR}/third_party/sherpa-onnx/sherpa-onnx.cmake)
+    add_sherpa_onnx_libraries(smartglasses_android_app)
 endif()
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
@@ -202,4 +210,16 @@ if (ANDROID)
         add_compile_options(-march=armv8.2-a+fp16+dotprod)
         add_definitions(-DGGML_USE_NEON)
     endif()
+endif()
+
+# ----------------------------------------------------------------------------
+# 单元测试
+# ----------------------------------------------------------------------------
+# 只在非 Android 构建中生成：测试目标是给构建机的 host Qt 跑的桌面程序，
+# 不需要 Android 设备或 NDK，因此 APK 构建完全不受影响。
+# 本仓库当前唯一可离线验证的逻辑是 sentencesplitter（纯自由函数，
+# 不依赖 QObject / 信号槽 / 设备）——详见 tests/CMakeLists.txt。
+include(CTest)
+if (BUILD_TESTING AND NOT ANDROID)
+    add_subdirectory(tests)
 endif()

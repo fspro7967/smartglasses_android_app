@@ -585,16 +585,65 @@ ApplicationWindow {
                     }
 
                     // 页 1：AI 回复
-                    ScrollView {
-                        ScrollBar.vertical.policy: ScrollBar.AsNeeded
-                        Text {
-                            width: parent.width
-                            text: aiReply.length > 0 ? aiReply : qsTr("等待 AI 回复...")
-                            color: aiReply.length > 0 ? cText : cSubText
-                            font.pixelSize: 16
-                            wrapMode: Text.Wrap
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
+                    ColumnLayout {
+                        spacing: 8
+
+                        ScrollView {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            ScrollBar.vertical.policy: ScrollBar.AsNeeded
+                            Text {
+                                width: parent.width
+                                text: aiReply.length > 0 ? aiReply : qsTr("等待 AI 回复...")
+                                color: aiReply.length > 0 ? cText : cSubText
+                                font.pixelSize: 16
+                                wrapMode: Text.Wrap
+                                textFormat: Text.PlainText
+                                verticalAlignment: Text.AlignTop
+                            }
+                        }
+
+                        // 朗读控制：回复到达后自动朗读，这里只提供「停止」与「重播」。
+                        // 停止是立即生效的（后端会丢弃已缓冲音频）。
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+                            visible: aiReply.length > 0
+
+                            Button {
+                                text: qsTr("停止")
+                                Layout.fillWidth: true
+                                implicitHeight: 36
+                                enabled: backend.speaking
+                                onClicked: backend.stopSpeaking()
+                                contentItem: Text {
+                                    text: parent.text
+                                    color: backend.speaking ? cText : cSubText
+                                    font.pixelSize: 14
+                                    horizontalAlignment: Text.AlignHCenter
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                                background: Rectangle { radius: 8; color: cBorder }
+                            }
+
+                            Button {
+                                text: qsTr("重播")
+                                Layout.fillWidth: true
+                                implicitHeight: 36
+                                enabled: backend.ttsReady
+                                onClicked: backend.replayLastReply()
+                                contentItem: Text {
+                                    text: parent.text
+                                    color: backend.ttsReady ? "#FFFFFF" : cSubText
+                                    font.pixelSize: 14
+                                    horizontalAlignment: Text.AlignHCenter
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                                background: Rectangle {
+                                    radius: 8
+                                    color: backend.ttsReady ? cAccent : cBorder
+                                }
+                            }
                         }
                     }
                 }
