@@ -301,8 +301,23 @@ void DeviceHandler::onScanError(QBluetoothDeviceDiscoveryAgent::Error error)
 // ---------- 服务发现 ----------
 void DeviceHandler::onServiceDiscovered(const QBluetoothUuid &newService)
 {
+    // 取发信号的 controller，并确认它仍是当前控制器。
+    // 断开后 m_controller 会被置空、重连时会被新控制器取代，而旧控制器在异步删除
+    // 期间仍可能把已排队的结果发出来——connectToDevice 里为 connected/errorOccurred
+    // 处理的是同一个竞态。所以这里既不能直接解引用成员（空指针崩溃），也不能接受
+    // 旧控制器的事件（会把属于将亡控制器的 QLowEnergyService 塞进 m_services）。
+    QLowEnergyController *controller = qobject_cast<QLowEnergyController*>(sender());
+    if (!controller) {
+        qWarning() << "serviceDiscovered from unexpected sender, ignored:"
+                   << newService.toString();
+        return;
+    }
+    if (controller != m_controller) {
+        return;   // 来自已被取代或已断开的旧控制器，忽略
+    }
+
     // 为每个发现的服务创建 QLowEnergyService 对象
-    QLowEnergyService *service = m_controller->createServiceObject(newService, this);
+    QLowEnergyService *service = controller->createServiceObject(newService, this);
     if (!service) {
         qWarning() << "Failed to create service object for:" << newService.toString();
         return;
@@ -366,8 +381,14 @@ void DeviceHandler::onServiceStateChanged(QLowEnergyService::ServiceState newSta
 // ---------- 数据接收 ----------
 void DeviceHandler::onCharacteristicChanged(const QLowEnergyCharacteristic &c, const QByteArray &value)
 {
-    // 只转发当前激活的特征数据
-    if (m_activeService && m_activeCharacteristic.uuid() == c.uuid()) {
+    // 只转发当前激活的特征数据。
+    // 除特征外还必须比对服务：本信号是按服务分别连接的（见 onServiceDiscovered），
+    // 而同一特征 UUID 可以出现在不同服务里，只比 UUID 会让非激活服务的同名特征
+    // 数据混入转写缓冲。此判据与 enableCharacteristicNotification 关闭上一条通知时
+    // 的比对保持一致（服务 + 特征）。
+    QLowEnergyService *service = qobject_cast<QLowEnergyService*>(sender());
+    if (m_activeService && service == m_activeService
+            && m_activeCharacteristic.uuid() == c.uuid()) {
         emit dataReceived(value);
     }
 }

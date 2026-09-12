@@ -83,4 +83,65 @@ CMakeLists.txt.user*
 /build*/
 /.qtcreator/
 /debug*
-6a7b315ae8b278e4756b97a8_待提升.md
+
+# ----------------------------------------------------------------------------
+# Project-specific ignores (smartglasses_android_app)
+# ----------------------------------------------------------------------------
+
+# C/C++ / CMake build output (any depth, incl. third_party)
+build/
+*/build/
+build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+*.ninja
+.ninja_deps
+.ninja_log
+
+# Qt Creator / Qt tooling
+.qtc_clangd/
+CMakeLists.txt.user*
+
+# Android / Gradle
+.gradle/
+android/build/
+android/.cxx/
+android/app/build/
+local.properties
+captures/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# Secrets and credentials - NEVER commit these
+# android_release.keystore is intentionally excluded; keep your own backup.
+*.keystore
+*.jks
+*.p12
+*.pem
+*.key
+.env
+.env.*
+*.local
+secrets.properties
+keystore.properties
+
+# Python (model conversion / research scripts)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE
+.idea/
+*.iml
+# .vscode/settings.json 内含 release keystore 的 STORE_PASS/KEY_PASS 口令。
+# 仓库里提交的是脱敏模板 .vscode/settings.example.json。
+.vscode/settings.json
+
+# OS junk
+Desktop.ini
