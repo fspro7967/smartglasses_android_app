@@ -152,6 +152,14 @@ MainWindow::MainWindow(QObject *parent)
     connect(m_deviceHandler, &DeviceHandler::writeError, this, [this](const QString &err) {
         emit statusMessage("蓝牙写入失败: " + err);
     });
+    // 音频回传中止（吞吐不足或写入目标报错）：自动关掉回传，退回本机朗读。
+    // 必须有人关，否则合成会按真实时间继续喂数据，而队列只会一直满着。
+    connect(m_deviceHandler, &DeviceHandler::streamAborted, this, [this](const QString &reason) {
+        if (!m_bleAudioOut)
+            return;
+        setBleAudioOut(false);
+        emit statusMessage("已停止蓝牙音频回传: " + reason);
+    });
 
     connect(m_deviceHandler, &DeviceHandler::connected, this, [this]() {
         m_isConnected = true;
@@ -280,11 +288,48 @@ void MainWindow::setWriteTarget(const QString &serviceUuid, const QString &charU
 
 void MainWindow::clearWriteTarget()
 {
+    // 输出目标没了，音频回传也就没有去处：先关掉，避免开关停在「已开启」而实际发不出去
+    if (m_bleAudioOut)
+        setBleAudioOut(false);
+
     if (m_writeServiceUuid.isEmpty() && m_writeCharUuid.isEmpty())
         return;
     m_writeServiceUuid.clear();
     m_writeCharUuid.clear();
     emit writeTargetChanged();
+}
+
+// TTS 音频的 BLE 回传开关。开关本身总是生效（不因缺输出目标而拒绝），
+// 缺目标时只提示一次——逐块音频报错会把状态栏刷爆。
+void MainWindow::setBleAudioOut(bool enabled)
+{
+    if (m_bleAudioOut == enabled)
+        return;
+    m_bleAudioOut = enabled;
+
+    if (!enabled)
+        m_deviceHandler->clearStreamQueue();   // 关闭即静音：丢掉还没发出去的音频
+
+    applyAudioVolume();
+
+    if (enabled && (m_writeServiceUuid.isEmpty() || m_writeCharUuid.isEmpty()))
+        emit statusMessage("尚未选择可写特征作为输出目标，音频无法回传眼镜");
+    else
+        emit statusMessage(enabled ? QStringLiteral("已开启语音蓝牙回传（本机静音）")
+                                   : QStringLiteral("已关闭语音蓝牙回传（本机播放）"));
+
+    emit bleAudioOutChanged();
+}
+
+// 回传时把本机扬声器静音：音频是要在眼镜上放的，本机同时出声只会造成回声。
+//
+// 注意**不能**因此关掉 QAudioSink：它同时是整条流水线的节拍器——合成的推进由
+// 播放进度驱动（见 kBacklogLowWaterBytes），没有它消费音频，合成与「停止」判断
+// 都会失去时间基准。所以这里只改音量，不动播放通路。
+void MainWindow::applyAudioVolume()
+{
+    if (m_audioSink)
+        m_audioSink->setVolume(m_bleAudioOut ? 0.0 : 1.0);
 }
 
 void MainWindow::enableNotification(const QString &serviceUuid, const QString &charUuid)
@@ -507,8 +552,12 @@ void MainWindow::onAIResponse(const QString &response)
     if (response == QStringLiteral("[无识别结果]"))
         return;
 
-    // 把 AI 回复通过 BLE 写回眼镜（需先在服务列表中选择可写特征作为输出目标）
-    if (!m_writeServiceUuid.isEmpty() && !m_writeCharUuid.isEmpty()) {
+    // 把 AI 回复通过 BLE 写回眼镜（需先在服务列表中选择可写特征作为输出目标）。
+    // 音频回传开启时**不**再回写文本：两者共用同一个写入目标，原始字节在协议上
+    // 无法区分，混在一起会让眼镜把文本当成 PCM 播出来。
+    if (m_bleAudioOut) {
+        emit statusMessage("音频回传已开启，本次回复以语音发回眼镜");
+    } else if (!m_writeServiceUuid.isEmpty() && !m_writeCharUuid.isEmpty()) {
         m_deviceHandler->writeData(response.toUtf8());
     } else {
         emit statusMessage("未设置 BLE 输出目标，AI 回复仅显示在界面");
@@ -631,6 +680,8 @@ void MainWindow::setupAudioOutput(int modelSampleRate)
         m_audioSink = nullptr;
         return;
     }
+    // 允许重复初始化：这里可能发生在回传已开启之后，音量必须跟着当前开关走
+    applyAudioVolume();
     qDebug() << "音频输出已打开" << m_audioSampleRate << "Hz 单声道 int16"
              << "重采样:" << m_needResample;
 }
@@ -639,6 +690,12 @@ void MainWindow::onAudioChunk(const QByteArray &pcm, int sampleRate)
 {
     if (pcm.isEmpty())
         return;
+
+    // 音频回传：收到一块就镜像一份到蓝牙（与现有 BLE 读取的音频格式对应，
+    // 都是原生 PCM）。这里刻意用**模型原始采样率**，不做本机音频设备那套重采样：
+    // 回传的音频由眼镜播放，采样率不该迁就手机扬声器的能力。
+    if (m_bleAudioOut)
+        m_deviceHandler->enqueueStreamData(pcm);
 
     // 模型采样率与设备采样率不一致时，在这里补一次重采样。
     m_pendingPcm.append(m_needResample
@@ -828,6 +885,8 @@ void MainWindow::stopSpeaking()
     m_speakIndex = 0;
     m_sentencesOutstanding = 0;
     stopPlayback();
+    // 回传的音频必须跟着一起停：否则「停止」之后眼镜还会把已排队的几秒播完
+    m_deviceHandler->clearStreamQueue();
     setSpeaking(false);
 }
 

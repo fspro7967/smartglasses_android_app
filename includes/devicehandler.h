@@ -35,6 +35,18 @@ public:
     // 发送结果通过 writeFinished / writeError 信号异步返回。
     void writeData(const QByteArray &data);
 
+    // 流式下行（TTS 音频回传眼镜）：允许上一批还没发完就继续入队。
+    // 与 writeData() 的差别只有「忙时不拒绝」这一点，而这一点是必需的：
+    // 音频按真实时间连续产生，拒绝一次就是丢一段声音。
+    // 发送节拍按 MTU 自适应到略高于音频码率（见 streamTickIntervalMs），
+    // 队列积压超过上限时**停止接收**并发 streamAborted()，绝不无限增长。
+    // 返回 false 表示本次数据未入队（未设置写入目标 / 数据为空 / 队列已溢出）。
+    bool enqueueStreamData(const QByteArray &data);
+
+    // 丢弃尚未发出的流式数据（关闭回传、停止朗读、断开时调用）。
+    // 只清流式分片，不影响 writeData() 已排队的普通下行数据。
+    void clearStreamQueue();
+
 signals:
     void deviceDiscovered(const QBluetoothDeviceInfo &info);
     void scanFinished();
@@ -54,6 +66,9 @@ signals:
     // 下行写入信号
     void writeFinished();                                         // 整条数据发送完成
     void writeError(const QString &error);                        // 写入失败
+    // 流式下行中止：吞吐跟不上音频产生速率（队列溢出）或写入目标报错。
+    // 调用方（MainWindow）据此关闭音频回传，而不是继续往一个发不出去的目标堆数据。
+    void streamAborted(const QString &reason);
 
 private slots:
     void onDeviceDiscovered(const QBluetoothDeviceInfo &info);
@@ -69,8 +84,25 @@ private slots:
     void onServiceError(QLowEnergyService::ServiceError error);
 
 private:
+    // 一个待发送分片。oneShot 标记它来自 writeData()：只有这种「整批」数据
+    // 发完时才发 writeFinished；流式音频没有「一批发完」这个概念，
+    // 否则每排空一次队列就会往状态栏刷一条消息。
+    struct WriteChunk {
+        QByteArray data;
+        bool oneShot = false;
+    };
+
     // 根据服务UUID查找对应的QLowEnergyService对象
     QLowEnergyService* findService(const QString &uuid) const;
+    // 分包大小：由协商后的 ATT MTU 决定（MTU - 3 字节 ATT 头），未知时按默认 23 处理
+    int writeChunkSize() const;
+    // 无响应模式下流式发包的节拍（ms）：让发送速率略高于音频产生速率，
+    // MTU 大时包大、间隔长，MTU 小时间隔短，避免固定间隔在大包时突发、小包时饥饿
+    int streamTickIntervalMs() const;
+    // 队列非空且发送通道空闲时立刻启动发送（否则等定时器/完成回调推进）
+    void startSendingIfIdle();
+    // 队列排空后的收尾：只对普通下行发 writeFinished
+    void finishOneShotWriteIfDone();
     // 发送队首分片；队列空时收尾并发出 writeFinished
     void sendNextWriteChunk();
     // 清空待发送队列并停止发包定时器
@@ -89,9 +121,13 @@ private:
     // 写入目标（AI 回复等下行数据）
     QLowEnergyService *m_writeService = nullptr;
     QLowEnergyCharacteristic m_writeCharacteristic;
-    QList<QByteArray> m_writeQueue;            // 待发送的分片队列
+    QList<WriteChunk> m_writeQueue;            // 待发送的分片队列
     QTimer *m_writeTimer = nullptr;            // 无响应模式下的发包节拍
     QLowEnergyService::WriteMode m_writeMode = QLowEnergyService::WriteWithoutResponse;
+    qint64 m_streamQueuedBytes = 0;            // 队列中流式数据的字节数（用于积压上限）
+    bool m_streamOverflowed = false;           // 已溢出：队列排空前不再接收流式数据
+    bool m_oneShotPending = false;             // 队列中有普通下行数据待收尾
+    bool m_writeInFlight = false;              // 有响应写入：上一包未确认前不能再发
 };
 
 #endif // DEVICEHANDLER_H

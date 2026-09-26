@@ -3,6 +3,32 @@
 #include <QTimer>
 #include <QBluetoothUuid>
 
+namespace {
+
+// 无响应模式下普通下行（一整条 AI 回复等）的发包间隔。
+// 连续快速写入可能被蓝牙栈丢弃，逐包间隔发送更可靠。
+constexpr int kOneShotWriteIntervalMs = 15;
+
+// 流式音频（sherpa-onnx 合成出的 8 kHz 单声道 int16）的码率：16000 字节/秒。
+// 这是发送节拍的下限来源——发送必须比它快，积压才不会被耗尽。
+constexpr int kStreamAudioBytesPerSecond = 8000 * 2;
+
+// 发送速率相对音频码率的目标倍率。取 1.5 留出余量：
+// 蓝牙连接间隔抖动、重传都会吃掉带宽，刚好等于码率意味着队列只会越堆越高。
+constexpr double kStreamRateHeadroom = 1.5;
+
+// 流式发包间隔的上下限。下限防止 MTU 很小时定时器空转（Android 蓝牙栈对
+// 高频写入会丢包，所以不再往下压）；上限防止 MTU 很大时出现长时间的静默间隔。
+constexpr int kStreamMinTickMs = 10;
+constexpr int kStreamMaxTickMs = 50;
+
+// 流式队列的积压上限：64 KiB ≈ 4 秒的 8 kHz int16 音频。
+// 它是安全阀而非常规路径——正常时队列只会有几十毫秒的数据（见 streamTickIntervalMs）。
+// 到上限说明蓝牙吞吐确实跟不上音频产生速率，此时停止接收并上报，而不是让内存涨下去。
+constexpr qint64 kMaxStreamQueueBytes = 64 * 1024;
+
+} // namespace
+
 DeviceHandler::DeviceHandler(QObject *parent)
     : QObject(parent)
     , m_discoveryAgent(new QBluetoothDeviceDiscoveryAgent(this))
@@ -16,8 +42,7 @@ DeviceHandler::DeviceHandler(QObject *parent)
     connect(m_discoveryAgent, &QBluetoothDeviceDiscoveryAgent::finished,
             this, &DeviceHandler::scanFinished);
 
-    // 无响应写入模式的发包节拍：连续快速写入可能被蓝牙栈丢弃，逐包间隔发送更可靠
-    m_writeTimer->setInterval(15);
+    m_writeTimer->setInterval(kOneShotWriteIntervalMs);
     connect(m_writeTimer, &QTimer::timeout, this, &DeviceHandler::onWriteTimerTimeout);
 }
 
@@ -199,7 +224,7 @@ void DeviceHandler::writeData(const QByteArray &data)
         emit writeError("未设置写入目标，无法发送数据");
         return;
     }
-    if (!m_writeQueue.isEmpty()) {
+    if (m_oneShotPending) {
         emit writeError("正在发送上一条数据，请稍候");
         return;
     }
@@ -208,20 +233,98 @@ void DeviceHandler::writeData(const QByteArray &data)
         return;
     }
 
-    // 分包大小取决于协商后的 ATT MTU（MTU - 3 字节 ATT 头），未知时按默认 23 字节 MTU 处理
-    int chunkSize = 20;
-    if (m_controller) {
-        const int mtu = m_controller->mtu();
-        if (mtu > 3)
-            chunkSize = mtu - 3;
+    const int chunkSize = writeChunkSize();
+    for (int i = 0; i < data.size(); i += chunkSize) {
+        WriteChunk chunk;
+        chunk.data = data.mid(i, chunkSize);
+        chunk.oneShot = true;
+        m_writeQueue.append(chunk);
     }
-
-    m_writeQueue.clear();
-    for (int i = 0; i < data.size(); i += chunkSize)
-        m_writeQueue.append(data.mid(i, chunkSize));
+    m_oneShotPending = true;
 
     qDebug() << "DeviceHandler::writeData" << data.size() << "bytes ->"
              << m_writeQueue.size() << "chunks, chunkSize =" << chunkSize;
+
+    startSendingIfIdle();
+}
+
+bool DeviceHandler::enqueueStreamData(const QByteArray &data)
+{
+    // 未设置写入目标时静默丢弃：流式音频每几十毫秒来一块，逐个报错会把状态栏刷爆，
+    // 「没有回传目标」这件事由调用方（MainWindow）在开启回传时一次性告知用户。
+    if (!m_writeService || !m_writeCharacteristic.isValid())
+        return false;
+    if (data.isEmpty())
+        return false;
+
+    // 已经溢出的那一批还没排空之前不再接收新数据。若继续收，就会变成
+    // 「丢一段、发一段」的断续噪声；不如让调用方彻底关掉回传。
+    if (m_streamOverflowed)
+        return false;
+
+    if (m_streamQueuedBytes + data.size() > kMaxStreamQueueBytes) {
+        m_streamOverflowed = true;
+        emit streamAborted(QString("蓝牙吞吐不足，回传队列积压 %1 KiB")
+                           .arg(m_streamQueuedBytes / 1024));
+        return false;
+    }
+
+    const int chunkSize = writeChunkSize();
+    for (int i = 0; i < data.size(); i += chunkSize) {
+        WriteChunk chunk;
+        chunk.data = data.mid(i, chunkSize);
+        chunk.oneShot = false;             // 流式数据不产生 writeFinished
+        m_writeQueue.append(chunk);
+        m_streamQueuedBytes += chunk.data.size();
+    }
+
+    startSendingIfIdle();
+    return true;
+}
+
+void DeviceHandler::clearStreamQueue()
+{
+    m_streamQueuedBytes = 0;
+    m_streamOverflowed = false;
+    // 只摘掉流式分片，保留 writeData() 排队中的普通下行数据（顺序不变）。
+    // m_writeInFlight 不动：已发出的那包仍在等确认，由 onCharacteristicWritten 收尾。
+    for (int i = m_writeQueue.size() - 1; i >= 0; --i) {
+        if (!m_writeQueue.at(i).oneShot)
+            m_writeQueue.removeAt(i);
+    }
+    if (m_writeQueue.isEmpty())
+        m_writeTimer->stop();
+}
+
+int DeviceHandler::writeChunkSize() const
+{
+    // 分包大小取决于协商后的 ATT MTU（MTU - 3 字节 ATT 头），未知时按默认 23 字节 MTU 处理
+    if (m_controller) {
+        const int mtu = m_controller->mtu();
+        if (mtu > 3)
+            return mtu - 3;
+    }
+    return 20;
+}
+
+int DeviceHandler::streamTickIntervalMs() const
+{
+    const double bytesPerTickTarget = kStreamAudioBytesPerSecond * kStreamRateHeadroom;
+    const int interval = int(writeChunkSize() * 1000.0 / bytesPerTickTarget);
+    return qBound(kStreamMinTickMs, interval, kStreamMaxTickMs);
+}
+
+void DeviceHandler::startSendingIfIdle()
+{
+    if (m_writeQueue.isEmpty())
+        return;
+
+    if (m_writeMode == QLowEnergyService::WriteWithResponse) {
+        if (m_writeInFlight)
+            return;                        // 等 characteristicWritten 回来再发下一包
+    } else if (m_writeTimer->isActive()) {
+        return;                            // 无响应模式：已有节拍在推进，插队会突发
+    }
 
     sendNextWriteChunk();
 }
@@ -230,30 +333,57 @@ void DeviceHandler::sendNextWriteChunk()
 {
     if (m_writeQueue.isEmpty()) {
         m_writeTimer->stop();
-        emit writeFinished();
+        finishOneShotWriteIfDone();
         return;
     }
 
-    const QByteArray chunk = m_writeQueue.takeFirst();
-    m_writeService->writeCharacteristic(m_writeCharacteristic, chunk, m_writeMode);
+    const WriteChunk chunk = m_writeQueue.takeFirst();
+    if (!chunk.oneShot)
+        m_streamQueuedBytes -= chunk.data.size();
 
     if (m_writeMode == QLowEnergyService::WriteWithoutResponse) {
-        // 无响应模式没有完成回调，由定时器按节拍继续发送剩余分片；
-        // 若队列已空，停止定时器并立即收尾，避免重复触发 writeFinished
-        if (!m_writeQueue.isEmpty()) {
-            m_writeTimer->start();
-        } else {
-            m_writeTimer->stop();
-            emit writeFinished();
-        }
+        // 无响应写入没有完成回调，只能靠定时器控制节拍：普通下行沿用固定间隔，
+        // 流式音频按 MTU 自适应（见 streamTickIntervalMs）。
+        m_writeTimer->setInterval(chunk.oneShot ? kOneShotWriteIntervalMs
+                                                : streamTickIntervalMs());
+    } else {
+        m_writeInFlight = true;
     }
-    // WriteWithResponse 模式：等待 characteristicWritten 确认后再发下一包
+
+    m_writeService->writeCharacteristic(m_writeCharacteristic, chunk.data, m_writeMode);
+
+    if (m_writeMode != QLowEnergyService::WriteWithoutResponse)
+        return;                            // WriteWithResponse 模式：等 characteristicWritten 确认后再发下一包
+
+    // 无响应模式没有完成回调，由定时器按节拍继续发送剩余分片；
+    // 若队列已空，停止定时器并立即收尾，避免重复触发 writeFinished
+    if (!m_writeQueue.isEmpty()) {
+        m_writeTimer->start();
+    } else {
+        m_writeTimer->stop();
+        finishOneShotWriteIfDone();
+    }
+}
+
+void DeviceHandler::finishOneShotWriteIfDone()
+{
+    // 队列排空意味着积压已经清掉，下一次回传可以重新尝试（上限只是安全阀）
+    m_streamOverflowed = false;
+
+    if (!m_oneShotPending)
+        return;
+    m_oneShotPending = false;
+    emit writeFinished();
 }
 
 void DeviceHandler::clearWriteQueue()
 {
     m_writeTimer->stop();
     m_writeQueue.clear();
+    m_streamQueuedBytes = 0;
+    m_streamOverflowed = false;
+    m_oneShotPending = false;
+    m_writeInFlight = false;
 }
 
 void DeviceHandler::onWriteTimerTimeout()
@@ -269,8 +399,9 @@ void DeviceHandler::onCharacteristicWritten(const QLowEnergyCharacteristic &c,
         return;
     if (!m_writeCharacteristic.isValid() || c.uuid() != m_writeCharacteristic.uuid())
         return;
-    if (m_writeQueue.isEmpty())
-        return;
+
+    m_writeInFlight = false;
+    // 队列可能已空（普通下行收尾）也可能还有分片，交给 sendNextWriteChunk 判断
     sendNextWriteChunk();
 }
 
@@ -282,8 +413,14 @@ void DeviceHandler::onServiceError(QLowEnergyService::ServiceError error)
     if (m_writeQueue.isEmpty())
         return;
 
+    // 流式音频报错时还要额外上报：写失败会一直失败，继续按真实时间喂数据
+    // 只会反复报错。让调用方关掉回传才是出口。
+    const bool wasStreaming = m_streamQueuedBytes > 0 || m_streamOverflowed;
+
     clearWriteQueue();
     emit writeError("特征写入失败，错误码: " + QString::number(int(error)));
+    if (wasStreaming)
+        emit streamAborted("写入失败，错误码: " + QString::number(int(error)));
 }
 
 // ---------- 扫描槽 ----------

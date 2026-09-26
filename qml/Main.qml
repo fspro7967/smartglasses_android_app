@@ -353,11 +353,13 @@ ApplicationWindow {
         // ---- 服务/特征列表（数据由 C++ 端 backend.services 提供） ----
         Rectangle {
             id: servicesCard
-            visible: backend.services.length > 0
+            // 连上设备就显示卡片（哪怕服务还没发现完）：否则「手机上看不到任何可选特征」
+            // 与「服务/特征还在发现中」在界面上完全无法区分。
+            visible: backend.services.length > 0 || backend.connected
             Layout.fillWidth: true
             Layout.preferredHeight: servicesExpanded
-                ? serviceHeaderH + serviceStatusH + Math.min(serviceContent.contentHeight, 200)
-                : serviceHeaderH + serviceStatusH
+                ? serviceHeaderH + serviceStatusH + audioOutRowH + listH
+                : serviceHeaderH + serviceStatusH + audioOutRowH
             radius: 12
             color: cCard
             border.color: cBorder
@@ -365,6 +367,22 @@ ApplicationWindow {
             readonly property int serviceHeaderH: 36
             // 写入目标状态行高度：连接中（有或没有输出目标）时显示一行提示
             readonly property int serviceStatusH: (backend.writeTarget !== "" || backend.connected) ? 26 : 0
+            // 音频回传开关行高度（只在状态行显示时才有意义）。
+            // 40 = Basic 样式 Switch 的隐式高度（28 的指示器 + 上下各 6 的 padding），
+            // 给少了指示器会被裁掉。
+            readonly property int audioOutRowH: serviceStatusH > 0 ? 40 : 0
+            // 服务/特征列表的最大高度。以前写死 200：特征多时后面的行被裁在折叠线下，
+            // 而手机上没有鼠标滚轮，只能在这一小块区域里滑动去找可写特征——「在手机端
+            // 看不到选择写入特征的选项」就是从这里来的。改成随窗口高度自适应，
+            // 上限 280 是为了不把下方的字幕区挤没。
+            readonly property int serviceListMaxH:
+                Math.max(150, Math.min(280, Math.round(root.height * 0.3)))
+            // 「正在获取服务与特征…」占位行高度（还没发现到任何服务时显示）
+            readonly property int serviceEmptyH: 28
+            // 卡片里列表区的高度：有服务就按内容（受上限约束），没有就留给占位行
+            readonly property int listH: backend.services.length > 0
+                ? Math.min(serviceContent.contentHeight, serviceListMaxH)
+                : serviceEmptyH
 
             ColumnLayout {
                 anchors.fill: parent
@@ -373,7 +391,12 @@ ApplicationWindow {
                 // 标题行（点击展开/折叠）
                 Rectangle {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: parent.serviceHeaderH
+                    // 必须是 servicesCard. 限定名：本行父对象是内层 ColumnLayout，
+                    // 它没有 serviceHeaderH 属性。写成 parent.serviceHeaderH 只会得到
+                    // undefined（运行时报 Unable to assign [undefined] to double），
+                    // 高度变成 0 —— 真机上「蓝牙服务」标题、展开箭头、以及整行的点击
+                    // 区域都会消失。
+                    Layout.preferredHeight: servicesCard.serviceHeaderH
                     color: "transparent"
                     MouseArea {
                         anchors.fill: parent
@@ -384,7 +407,9 @@ ApplicationWindow {
                         anchors.leftMargin: 12
                         anchors.rightMargin: 8
                         Text {
-                            text: qsTr("蓝牙服务 (%1)").arg(backend.services.length)
+                            text: backend.services.length > 0
+                                  ? qsTr("蓝牙服务 (%1)").arg(backend.services.length)
+                                  : qsTr("蓝牙服务")
                             color: cSubText
                             font.pixelSize: 12
                             Layout.fillWidth: true
@@ -407,7 +432,9 @@ ApplicationWindow {
                     spacing: 6
                     Text {
                         visible: backend.writeTarget !== ""
-                        text: qsTr("AI 回复输出: ") + backend.writeTargetName
+                        text: backend.bleAudioOut
+                              ? qsTr("语音回传: ") + backend.writeTargetName + qsTr("（本机静音）")
+                              : qsTr("AI 回复输出: ") + backend.writeTargetName
                         color: cGreen
                         font.pixelSize: 11
                         elide: Text.ElideMiddle
@@ -415,7 +442,7 @@ ApplicationWindow {
                     }
                     Text {
                         visible: backend.writeTarget === ""
-                        text: qsTr("点击带“写”属性的特征，可将 AI 回复发回眼镜")
+                        text: qsTr("点选可写特征的「设为输出」，AI 回复即可发回眼镜")
                         color: cSubText
                         font.pixelSize: 11
                         elide: Text.ElideMiddle
@@ -423,11 +450,59 @@ ApplicationWindow {
                     }
                 }
 
+                // ---- 音频回传开关：把 TTS 合成出的 PCM 经 BLE 发回眼镜播 ----
+                // 与「AI 回复输出」是同一个写入目标，所以没选目标时开关不可用。
+                RowLayout {
+                    visible: servicesCard.serviceStatusH > 0
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: servicesCard.audioOutRowH
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 8
+                    spacing: 6
+                    Text {
+                        text: qsTr("语音回传眼镜")
+                        color: backend.bleAudioOut ? cGreen : cSubText
+                        font.pixelSize: 11
+                        Layout.fillWidth: true
+                    }
+                    Switch {
+                        id: bleAudioSwitch
+                        Layout.alignment: Qt.AlignVCenter
+                        enabled: backend.writeTarget !== "" && backend.ttsReady
+                        checked: backend.bleAudioOut
+                        onToggled: backend.setBleAudioOut(checked)
+                        // 后端可能自行关闭回传（蓝牙吞吐不足/写入失败）。用户点击开关
+                        // 会打断 checked 的绑定，所以这里显式同步一次界面状态。
+                        Connections {
+                            target: backend
+                            function onBleAudioOutChanged() {
+                                bleAudioSwitch.checked = backend.bleAudioOut
+                            }
+                        }
+                    }
+                }
+
+                // ---- 服务/特征尚未发现完时的占位行 ----
+                // 连上设备后卡片立即出现，这里告诉用户"还没有内容"而不是让卡片空着，
+                // 否则与"这个界面根本没有选择写入特征的入口"无法区分。
+                Text {
+                    visible: servicesExpanded && backend.services.length === 0
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: servicesCard.serviceEmptyH
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 8
+                    text: qsTr("正在获取服务与特征…")
+                    color: cSubText
+                    font.pixelSize: 11
+                    elide: Text.ElideRight
+                    verticalAlignment: Text.AlignVCenter
+                }
+
                 ListView {
                     id: serviceContent
-                    visible: servicesExpanded
+                    visible: servicesExpanded && backend.services.length > 0
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Math.min(contentHeight, 200)
+                    Layout.preferredHeight: Math.min(contentHeight, servicesCard.serviceListMaxH)
                     clip: true
                     model: backend.services
                     delegate: Column {
@@ -510,26 +585,37 @@ ApplicationWindow {
                                             Layout.fillWidth: true
                                         }
                                     }
-                                    Row {
+                                    RowLayout {
                                         spacing: 8
                                         Text {
                                             visible: modelData.notifiable
+                                            Layout.alignment: Qt.AlignVCenter
                                             text: qsTr("通知")
                                             color: cSubText
                                             font.pixelSize: 11
                                         }
-                                        Text {
-                                            visible: charRow.isWriteTarget
-                                            text: qsTr("输出目标")
-                                            color: cGreen
-                                            font.pixelSize: 11
-                                            font.bold: true
-                                        }
-                                        Text {
-                                            visible: modelData.writable && !charRow.isWriteTarget
-                                            text: qsTr("设为输出")
-                                            color: cAccent
-                                            font.pixelSize: 11
+                                        // 可写特征的操作按钮。整行都可点（见上面的 MouseArea），
+                                        // 做成按钮外观只是为了让这个入口在手机上一眼可见：
+                                        // 旧写法是一段 11px 的普通文字「设为输出」，很容易被
+                                        // 当成说明文字跳过，用户就找不到「在哪里选写入特征」。
+                                        Rectangle {
+                                            visible: modelData.writable
+                                            Layout.alignment: Qt.AlignVCenter
+                                            radius: 6
+                                            implicitWidth: writeTargetText.implicitWidth + 16
+                                            implicitHeight: 26
+                                            color: charRow.isWriteTarget ? cGreen
+                                                 : (mouse.pressed ? "#3D6FD1" : cAccent)
+                                            Text {
+                                                id: writeTargetText
+                                                anchors.centerIn: parent
+                                                text: charRow.isWriteTarget
+                                                      ? qsTr("输出目标")
+                                                      : qsTr("设为输出")
+                                                color: "#FFFFFF"
+                                                font.pixelSize: 11
+                                                font.bold: charRow.isWriteTarget
+                                            }
                                         }
                                     }
                                 }

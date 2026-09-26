@@ -34,6 +34,8 @@ class MainWindow : public QObject
     Q_PROPERTY(bool ttsReady READ isTtsReady NOTIFY ttsReadyChanged)
     // 是否正在朗读。QML 用它决定「停止」按钮的可用状态。
     Q_PROPERTY(bool speaking READ isSpeaking NOTIFY speakingChanged)
+    // 是否把 TTS 音频通过 BLE 回传眼镜（开启时本机扬声器静音）
+    Q_PROPERTY(bool bleAudioOut READ isBleAudioOut NOTIFY bleAudioOutChanged)
 
 public:
     explicit MainWindow(QObject *parent = nullptr);
@@ -51,6 +53,7 @@ public:
     QString writeTargetName() const { return m_writeCharUuid; }
     bool isTtsReady() const { return m_ttsReady; }
     bool isSpeaking() const { return m_speaking; }
+    bool isBleAudioOut() const { return m_bleAudioOut; }
 
     Q_INVOKABLE void startScan();
     Q_INVOKABLE void connectToDevice(int index);
@@ -64,6 +67,9 @@ public:
     Q_INVOKABLE void stopSpeaking();
     // 重新朗读上一条 AI 回复（回复为空时什么也不做）
     Q_INVOKABLE void replayLastReply();
+    // 开启/关闭 TTS 音频的 BLE 回传（需先设置可写特征作为输出目标）。
+    // 开启后本机扬声器静音：音频是要在眼镜上放的，本机同时出声只会造成回声。
+    Q_INVOKABLE void setBleAudioOut(bool enabled);
 
     // ===== AI 大模型接入方式（暴露给 QML 的设置菜单） =====
     Q_INVOKABLE int aiProvider() const;                            // 0=API, 1=Ollama
@@ -89,6 +95,7 @@ signals:
     void writeTargetChanged();                                        // BLE 写入目标已变更
     void ttsReadyChanged();
     void speakingChanged();
+    void bleAudioOutChanged();                                        // 音频回传开关已变更
     // 内部用：把后台线程的提取/初始化结果投递回 GUI 线程（见 prepareTtsModel）
     void ttsPrepared(int sampleRate);
     void ttsPrepareFailed(const QString &error);
@@ -122,6 +129,8 @@ private:
     // 把暂存的 PCM 尽量写进音频设备
     void writePendingAudio();
     void stopPlayback();
+    // 按当前回传开关设置本机扬声器音量（回传时静音，见 setBleAudioOut）
+    void applyAudioVolume();
     // 把一段回复切句后按「一句合成完再喂下一句」的节奏朗读
     void speakReply(const QString &reply);
     void speakNextSentence();
@@ -160,6 +169,8 @@ private:
     bool m_ttsReady = false;
     bool m_ttsPreparing = false;
     bool m_speaking = false;
+    // 音频回传：把合成出的 PCM 经 BLE 发给眼镜，而不是（只）本机播放
+    bool m_bleAudioOut = false;
     // 连续「有积压但一个字节都写不进去」的排空次数，用于识别设备无响应
     int m_stalledTicks = 0;
     QList<QFuture<void>> m_ttsFutures;  // 持有后台提取任务的句柄
