@@ -434,7 +434,9 @@ ApplicationWindow {
                         visible: backend.writeTarget !== ""
                         text: backend.bleAudioOut
                               ? qsTr("语音回传: ") + backend.writeTargetName + qsTr("（本机静音）")
-                              : qsTr("AI 回复输出: ") + backend.writeTargetName
+                              : backend.boardDetected
+                                ? qsTr("开发板: ") + backend.writeTargetName + qsTr("（开启下方开关回传语音）")
+                                : qsTr("AI 回复输出: ") + backend.writeTargetName
                         color: cGreen
                         font.pixelSize: 11
                         elide: Text.ElideMiddle

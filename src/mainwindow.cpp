@@ -186,6 +186,9 @@ MainWindow::MainWindow(QObject *parent)
             &MainWindow::onServiceDiscovered);
     connect(m_deviceHandler, &DeviceHandler::characteristicDiscovered, this,
             &MainWindow::onCharacteristicDiscovered);
+    // 服务详情全部发现后识别开发板并自动配置收发特征（见 configureBoard）
+    connect(m_deviceHandler, &DeviceHandler::serviceDetailsDiscoveryFinished, this,
+            &MainWindow::onServiceDetailsDiscoveryFinished);
 
     // 初始化 Whisper：模型直接从 assets 读进内存，不再解压到磁盘。
     // 因此 AppDataLocation 下不会再出现 whisper 模型文件。
@@ -276,6 +279,14 @@ void MainWindow::disconnectDevice()
 // 设置 AI 回复的 BLE 写入目标（转发给 DeviceHandler，仅在其接受后更新 UI 状态）
 void MainWindow::setWriteTarget(const QString &serviceUuid, const QString &charUuid)
 {
+    // 开发板的控制特征只收发文本指令，不接受下行音频；误选它会把音频字节喂给
+    // 指令解析器。开发板的下行目标固定是播放特征，控制指令由 boardPlayIfNeeded()
+    // 单独发送（见 configureBoard）。
+    if (m_board && charUuid == QLatin1String(BoardProtocol::kControlCharUuid)) {
+        emit statusMessage("开发板控制特征仅用于指令，音频回传请选择播放特征");
+        return;
+    }
+
     if (m_deviceHandler->setWriteTarget(serviceUuid, charUuid)) {
         m_writeServiceUuid = serviceUuid;
         m_writeCharUuid = charUuid;
@@ -307,8 +318,15 @@ void MainWindow::setBleAudioOut(bool enabled)
         return;
     m_bleAudioOut = enabled;
 
-    if (!enabled)
+    if (!enabled) {
         m_deviceHandler->clearStreamQueue();   // 关闭即静音：丢掉还没发出去的音频
+        boardStopIfNeeded();                   // 让开发板也停下，别把已入队的播完
+    }
+
+    // 字节率跟着实际回传采样率走：开发板 16 kHz 时码率翻倍。它决定无响应写入的
+    // 发包节拍，以及流式队列的积压上限（有响应写入回传由每包 ACK 限速，节拍器不参与）。
+    const int streamRate = bleStreamSampleRate();
+    m_deviceHandler->setStreamByteRate(streamRate * static_cast<int>(sizeof(qint16)));
 
     applyAudioVolume();
 
@@ -428,7 +446,92 @@ void MainWindow::setOllamaConfig(const QString &serverUrl, const QString &modelN
 void MainWindow::clearServices()
 {
     m_services.clear();
+    // 服务列表清空意味着设备已断开或切换：开发板识别状态失效，重新发现后再配置
+    const bool wasBoard = m_board;
+    m_board = false;
+    m_boardPlaying = false;
+    m_boardControlServiceUuid.clear();
+    m_boardControlCharUuid.clear();
+    if (wasBoard)
+        emit boardDetectedChanged();
     emit servicesChanged();
+}
+
+// 开发板识别与自动配置：发现服务详情后，如果存在开发板服务，就把三个特征各就各位。
+// 这样用户不必手工从特征树里挑——开发板的音频/控制特征 UUID 固定，手工选错
+// （例如把控制特征当输出）会让音频被当成未知指令。
+void MainWindow::onServiceDetailsDiscoveryFinished()
+{
+    if (m_deviceHandler->servicePresent(QLatin1String(BoardProtocol::kServiceUuid)))
+        configureBoard();
+}
+
+void MainWindow::configureBoard()
+{
+    const QString serviceUuid = QLatin1String(BoardProtocol::kServiceUuid);
+
+    m_board = true;
+    m_boardControlServiceUuid = serviceUuid;
+    m_boardControlCharUuid = QLatin1String(BoardProtocol::kControlCharUuid);
+
+    // 麦克风 PCM（板→手机）：开启音频特征通知，后续照常进入 Whisper 缓冲。
+    m_deviceHandler->enableCharacteristicNotification(
+        serviceUuid, QLatin1String(BoardProtocol::kAudioCharUuid), true);
+
+    // 扬声器 PCM（手机→板）：把播放特征设为下行写入目标（音频回传开关据此可用）。
+    // 复用 setWriteTarget() 这一唯一写入口更新 UI 状态；播放特征不触发上面的
+    // 控制特征守卫，因此会被接受。
+    setWriteTarget(serviceUuid, QLatin1String(BoardProtocol::kPlaybackCharUuid));
+
+    emit boardDetectedChanged();
+    emit statusMessage(QStringLiteral(
+        "已识别开发板 ESP32_Audio：播放特征设为回传目标，麦克风通知已开启"));
+}
+
+// 回传采样率：开发板固件固定 16 kHz 解码播放特征；其他设备沿用 TTS 模型采样率。
+int MainWindow::bleStreamSampleRate() const
+{
+    if (m_board)
+        return BoardProtocol::kSampleRate;
+    const int modelRate = m_synthesizer ? m_synthesizer->sampleRate() : 0;
+    return modelRate > 0 ? modelRate : 8000;
+}
+
+// 一轮播放开始前给开发板发 "play"（固件收到前会丢弃播放特征上的音频）。
+// 在音频回传开启且当前不在播放态时发送，因此重播/新一轮回复都会重新触发。
+// 返回 false 表示 play 发不出去、回传已关闭，调用方必须停止喂音频。
+bool MainWindow::boardPlayIfNeeded()
+{
+    if (!m_board || !m_bleAudioOut)
+        return true;                 // 非开发板：无需 play，照常回传
+    if (m_boardPlaying)
+        return true;
+
+    if (m_boardControlServiceUuid.isEmpty()
+        || !m_deviceHandler->writeControlValue(m_boardControlServiceUuid,
+                                               m_boardControlCharUuid,
+                                               QByteArray(BoardProtocol::kCmdPlay))) {
+        // 控制特征不可用（服务/特征失效）：继续喂音频只会被板子丢弃，直接关掉回传，
+        // 并让本次音频不再入队。writeControlValue 已发过 writeError，状态栏有提示。
+        setBleAudioOut(false);
+        return false;
+    }
+    m_boardPlaying = true;
+    return true;
+}
+
+// 播放结束/中止时给开发板发 "stop"，否则扬声器会停在播放态等待后续音频。
+void MainWindow::boardStopIfNeeded()
+{
+    if (!m_boardPlaying)
+        return;
+    m_boardPlaying = false;
+    // 断开过程中服务对象已销毁，此时再写只会报错，直接复位状态即可。
+    if (!m_isConnected || m_boardControlServiceUuid.isEmpty())
+        return;
+    m_deviceHandler->writeControlValue(m_boardControlServiceUuid,
+                                       m_boardControlCharUuid,
+                                       QByteArray(BoardProtocol::kCmdStop));
 }
 
 void MainWindow::onServiceDiscovered(const QString &serviceUuid)
@@ -557,6 +660,10 @@ void MainWindow::onAIResponse(const QString &response)
     // 无法区分，混在一起会让眼镜把文本当成 PCM 播出来。
     if (m_bleAudioOut) {
         emit statusMessage("音频回传已开启，本次回复以语音发回眼镜");
+    } else if (m_board) {
+        // 开发板没有文本显示，控制特征只认 play/stop 等指令；此时写文本会被当成
+        // 未知指令。要回传只能走语音。
+        emit statusMessage("开发板不接收文本，开启「语音回传眼镜」后将以语音发出");
     } else if (!m_writeServiceUuid.isEmpty() && !m_writeCharUuid.isEmpty()) {
         m_deviceHandler->writeData(response.toUtf8());
     } else {
@@ -692,10 +799,17 @@ void MainWindow::onAudioChunk(const QByteArray &pcm, int sampleRate)
         return;
 
     // 音频回传：收到一块就镜像一份到蓝牙（与现有 BLE 读取的音频格式对应，
-    // 都是原生 PCM）。这里刻意用**模型原始采样率**，不做本机音频设备那套重采样：
-    // 回传的音频由眼镜播放，采样率不该迁就手机扬声器的能力。
-    if (m_bleAudioOut)
-        m_deviceHandler->enqueueStreamData(pcm);
+    // 都是原生 PCM）。采样率按目标设备来：开发板固件固定按 16 kHz 解码播放特征，
+    // 而模型是 8 kHz，必须先升采样，否则听到的是半速慢放；非开发板沿用模型
+    // 原始采样率（回传音频由眼镜播放，不该迁就手机扬声器的能力）。
+    // boardPlayIfNeeded() 负责在首个分片之前让板子进入播放态；返回 false 时回传
+    // 已被关闭，本块不再入队。
+    if (m_bleAudioOut && boardPlayIfNeeded()) {
+        const int outRate = bleStreamSampleRate();
+        m_deviceHandler->enqueueStreamData(
+            sampleRate == outRate ? pcm
+                                  : resampleLinearLe(pcm, sampleRate, outRate));
+    }
 
     // 模型采样率与设备采样率不一致时，在这里补一次重采样。
     m_pendingPcm.append(m_needResample
@@ -797,6 +911,9 @@ void MainWindow::setSpeaking(bool speaking)
     if (m_speaking == speaking)
         return;
     m_speaking = speaking;
+    // 朗读结束（自然结束或用户停止）后让开发板退出播放态
+    if (!speaking)
+        boardStopIfNeeded();
     emit speakingChanged();
 }
 

@@ -9,9 +9,9 @@ namespace {
 // 连续快速写入可能被蓝牙栈丢弃，逐包间隔发送更可靠。
 constexpr int kOneShotWriteIntervalMs = 15;
 
-// 流式音频（sherpa-onnx 合成出的 8 kHz 单声道 int16）的码率：16000 字节/秒。
-// 这是发送节拍的下限来源——发送必须比它快，积压才不会被耗尽。
-constexpr int kStreamAudioBytesPerSecond = 8000 * 2;
+// 流式音频发包节拍的下限来源是发送字节率（见 DeviceHandler::m_streamByteRate）：
+// 默认 8 kHz 单声道 int16 = 16000 字节/秒；开发板要求 16 kHz 时由 MainWindow
+// 通过 setStreamByteRate() 提到 32000。发送必须比音频产生快，积压才不会被耗尽。
 
 // 发送速率相对音频码率的目标倍率。取 1.5 留出余量：
 // 蓝牙连接间隔抖动、重传都会吃掉带宽，刚好等于码率意味着队列只会越堆越高。
@@ -22,10 +22,12 @@ constexpr double kStreamRateHeadroom = 1.5;
 constexpr int kStreamMinTickMs = 10;
 constexpr int kStreamMaxTickMs = 50;
 
-// 流式队列的积压上限：64 KiB ≈ 4 秒的 8 kHz int16 音频。
+// 流式队列积压上限对应的时间窗：约 4 秒音频。用时间而非固定字节数表达，
+// 这样 8 kHz（16 KB/s，≈64 KiB）与开发板要求的 16 kHz（32 KB/s，≈128 KiB）
+// 拥有相同的安全余量，队列容量不随采样率翻倍而被腰斩。
 // 它是安全阀而非常规路径——正常时队列只会有几十毫秒的数据（见 streamTickIntervalMs）。
 // 到上限说明蓝牙吞吐确实跟不上音频产生速率，此时停止接收并上报，而不是让内存涨下去。
-constexpr qint64 kMaxStreamQueueBytes = 64 * 1024;
+constexpr int kStreamQueueSeconds = 4;
 
 } // namespace
 
@@ -218,6 +220,45 @@ bool DeviceHandler::setWriteTarget(const QString &serviceUuid, const QString &ch
     return true;
 }
 
+bool DeviceHandler::servicePresent(const QString &uuid) const
+{
+    return findService(uuid) != nullptr;
+}
+
+bool DeviceHandler::writeControlValue(const QString &serviceUuid,
+                                      const QString &charUuid,
+                                      const QByteArray &data)
+{
+    if (data.isEmpty())
+        return false;
+
+    QLowEnergyService *service = findService(serviceUuid);
+    if (!service) {
+        emit writeError("控制指令服务不存在: " + serviceUuid);
+        return false;
+    }
+
+    const QLowEnergyCharacteristic ch = service->characteristic(QBluetoothUuid(charUuid));
+    if (!ch.isValid()) {
+        emit writeError("控制指令特征不存在: " + charUuid);
+        return false;
+    }
+
+    const auto props = ch.properties();
+    if (!(props & (QLowEnergyCharacteristic::Write
+                   | QLowEnergyCharacteristic::WriteNoResponse))) {
+        emit writeError("控制指令特征不可写: " + charUuid);
+        return false;
+    }
+
+    const QLowEnergyService::WriteMode mode =
+        (props & QLowEnergyCharacteristic::WriteNoResponse)
+            ? QLowEnergyService::WriteWithoutResponse
+            : QLowEnergyService::WriteWithResponse;
+    service->writeCharacteristic(ch, data, mode);
+    return true;
+}
+
 void DeviceHandler::writeData(const QByteArray &data)
 {
     if (!m_writeService || !m_writeCharacteristic.isValid()) {
@@ -262,7 +303,9 @@ bool DeviceHandler::enqueueStreamData(const QByteArray &data)
     if (m_streamOverflowed)
         return false;
 
-    if (m_streamQueuedBytes + data.size() > kMaxStreamQueueBytes) {
+    // 积压上限按字节率折算成固定时间窗，随采样率（8 kHz / 16 kHz）自动伸缩。
+    const qint64 maxQueuedBytes = qint64(m_streamByteRate) * kStreamQueueSeconds;
+    if (m_streamQueuedBytes + data.size() > maxQueuedBytes) {
         m_streamOverflowed = true;
         emit streamAborted(QString("蓝牙吞吐不足，回传队列积压 %1 KiB")
                            .arg(m_streamQueuedBytes / 1024));
@@ -309,9 +352,15 @@ int DeviceHandler::writeChunkSize() const
 
 int DeviceHandler::streamTickIntervalMs() const
 {
-    const double bytesPerTickTarget = kStreamAudioBytesPerSecond * kStreamRateHeadroom;
+    const double bytesPerTickTarget = m_streamByteRate * kStreamRateHeadroom;
     const int interval = int(writeChunkSize() * 1000.0 / bytesPerTickTarget);
     return qBound(kStreamMinTickMs, interval, kStreamMaxTickMs);
+}
+
+void DeviceHandler::setStreamByteRate(int bytesPerSecond)
+{
+    if (bytesPerSecond > 0)
+        m_streamByteRate = bytesPerSecond;
 }
 
 void DeviceHandler::startSendingIfIdle()

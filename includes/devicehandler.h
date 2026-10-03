@@ -11,6 +11,22 @@
 
 class QTimer;
 
+// 开发板（ESP32-C3 蓝牙音频收发器，见 smartglasses_board/src/main.cpp）的协议常量。
+// 开发板与手机各用一条特征：控制特征收发文本指令，音频特征上行麦克风 PCM，
+// 播放特征下行扬声器 PCM。三者采样率固定 16 kHz / 单声道 / int16 小端。
+// 这些 UUID 必须与固件一一对应，改固件时同步改这里。
+namespace BoardProtocol {
+inline constexpr const char *kServiceUuid      = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+inline constexpr const char *kControlCharUuid  = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+inline constexpr const char *kAudioCharUuid    = "66666666-6666-6666-6666-666666666666";
+inline constexpr const char *kPlaybackCharUuid = "88888888-8888-8888-8888-888888888888";
+// 开发板扬声器回传 PCM 的采样率（固件 SAMPLE_RATE = 16000）。
+inline constexpr int kSampleRate = 16000;
+// 控制特征上的播放指令：写 "play" 后开发板才接收播放特征上的音频。
+inline constexpr const char *kCmdPlay  = "play";
+inline constexpr const char *kCmdStop  = "stop";
+} // namespace BoardProtocol
+
 class DeviceHandler : public QObject
 {
     Q_OBJECT
@@ -31,6 +47,24 @@ public:
     // 设置 BLE 写入目标（把 AI 回复等下行数据写回眼镜）。
     // 返回 false 表示目标无效（服务/特征不存在或不可写）。
     bool setWriteTarget(const QString &serviceUuid, const QString &charUuid);
+
+    // 是否已发现指定 UUID 的服务。用于识别开发板并自动配置收发特征。
+    bool servicePresent(const QString &uuid) const;
+
+    // 向「控制特征」写入一条短指令（开发板的 play/stop/volume/status 等）。
+    // 与 setWriteTarget 的下行队列相互独立：控制特征与音频播放特征不是同一条，
+    // 指令也不该和音频分片混在一个队列里排队。指令很短且少，这里直接写入，
+    // 不做分片、不做节拍控制。
+    // 返回 false 表示服务/特征不存在或不可写。
+    bool writeControlValue(const QString &serviceUuid,
+                           const QString &charUuid,
+                           const QByteArray &data);
+
+    // 设置流式回传音频的字节率（字节/秒 = 采样率 × 2）。默认 8 kHz（16000 字节/秒）。
+    // 仅无响应写入(WriteWithoutResponse)的定时器节拍用它；有响应写入
+    // (WriteWithResponse，开发板播放特征即此类) 由每包 ACK 往返天然限速，
+    // 节拍器不参与，此时本值只用于换算流式队列的积压上限（见 enqueueStreamData）。
+    void setStreamByteRate(int bytesPerSecond);
     // 向写入目标发送数据；超长内容按当前 MTU 自动分包发送。
     // 发送结果通过 writeFinished / writeError 信号异步返回。
     void writeData(const QByteArray &data);
@@ -124,6 +158,7 @@ private:
     QList<WriteChunk> m_writeQueue;            // 待发送的分片队列
     QTimer *m_writeTimer = nullptr;            // 无响应模式下的发包节拍
     QLowEnergyService::WriteMode m_writeMode = QLowEnergyService::WriteWithoutResponse;
+    int m_streamByteRate = 8000 * 2;           // 流式回传字节率（默认 8 kHz int16）
     qint64 m_streamQueuedBytes = 0;            // 队列中流式数据的字节数（用于积压上限）
     bool m_streamOverflowed = false;           // 已溢出：队列排空前不再接收流式数据
     bool m_oneShotPending = false;             // 队列中有普通下行数据待收尾

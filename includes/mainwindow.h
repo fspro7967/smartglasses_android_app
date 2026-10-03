@@ -36,6 +36,9 @@ class MainWindow : public QObject
     Q_PROPERTY(bool speaking READ isSpeaking NOTIFY speakingChanged)
     // 是否把 TTS 音频通过 BLE 回传眼镜（开启时本机扬声器静音）
     Q_PROPERTY(bool bleAudioOut READ isBleAudioOut NOTIFY bleAudioOutChanged)
+    // 是否识别到开发板（ESP32-C3 蓝牙音频收发器）。识别后自动配置控制/音频/播放
+    // 特征，并对回传音频做 8k→16k 重采样、在播放前后发送 play/stop 指令。
+    Q_PROPERTY(bool boardDetected READ isBoardDetected NOTIFY boardDetectedChanged)
 
 public:
     explicit MainWindow(QObject *parent = nullptr);
@@ -50,10 +53,17 @@ public:
                 ? QString()
                 : m_writeServiceUuid + ":" + m_writeCharUuid;
     }
-    QString writeTargetName() const { return m_writeCharUuid; }
+    QString writeTargetName() const {
+        if (m_writeCharUuid == QLatin1String(BoardProtocol::kPlaybackCharUuid))
+            return QStringLiteral("扬声器");
+        if (m_writeCharUuid == QLatin1String(BoardProtocol::kControlCharUuid))
+            return QStringLiteral("控制指令");
+        return m_writeCharUuid;
+    }
     bool isTtsReady() const { return m_ttsReady; }
     bool isSpeaking() const { return m_speaking; }
     bool isBleAudioOut() const { return m_bleAudioOut; }
+    bool isBoardDetected() const { return m_board; }
 
     Q_INVOKABLE void startScan();
     Q_INVOKABLE void connectToDevice(int index);
@@ -96,6 +106,7 @@ signals:
     void ttsReadyChanged();
     void speakingChanged();
     void bleAudioOutChanged();                                        // 音频回传开关已变更
+    void boardDetectedChanged();                                      // 开发板识别状态已变更
     // 内部用：把后台线程的提取/初始化结果投递回 GUI 线程（见 prepareTtsModel）
     void ttsPrepared(int sampleRate);
     void ttsPrepareFailed(const QString &error);
@@ -103,6 +114,7 @@ signals:
 private slots:
     void onDataReceived(const QByteArray &data);
     void onServiceDiscovered(const QString &serviceUuid);
+    void onServiceDetailsDiscoveryFinished();
     void onCharacteristicDiscovered(const QString &serviceUuid,
                                     const QString &charUuid,
                                     const QString &charName,
@@ -122,6 +134,15 @@ private:
     void requestAndroidPermissions();
     void clearServices();
     void clearWriteTarget();          // 清空 BLE 写入目标（断开/切换设备时调用）
+    // 识别到开发板后自动配置三个特征：控制指令目标、麦克风音频通知、扬声器播放目标
+    void configureBoard();
+    // 开发板播放会话的开始/结束：向控制特征发 play/stop（非开发板时为无操作）。
+    // boardPlayIfNeeded() 返回 false 表示 play 指令发送失败（回传已随之关闭），
+    // 调用方不应再往播放特征喂音频。
+    bool boardPlayIfNeeded();
+    void boardStopIfNeeded();
+    // 蓝牙回传音频应使用的采样率：开发板固定 16 kHz，否则用 TTS 模型采样率
+    int bleStreamSampleRate() const;
     // 在后台线程提取 TTS 模型并初始化合成器（绝不占用构造函数）
     void prepareTtsModel();
     // 按模型采样率打开 QAudioSink；设备不支持时退回设备采样率并自行重采样
@@ -152,6 +173,12 @@ private:
     QString m_pendingDeviceName; // 正在连接中的设备名（连接成功时使用）
     QString m_writeServiceUuid;  // BLE 写入目标服务 UUID
     QString m_writeCharUuid;     // BLE 写入目标特征 UUID
+
+    // ===== 开发板（ESP32-C3 蓝牙音频收发器）适配状态 =====
+    bool m_board = false;                 // 已识别到开发板服务
+    bool m_boardPlaying = false;          // 已向开发板发送 play、扬声器处于播放态
+    QString m_boardControlServiceUuid;    // 开发板控制特征所在服务 UUID
+    QString m_boardControlCharUuid;       // 开发板控制特征 UUID
 
     // ===== 朗读（TTS）状态 =====
     QAudioSink *m_audioSink = nullptr;
