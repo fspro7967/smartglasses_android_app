@@ -119,14 +119,14 @@ void WhisperManager::processBuffer(const std::vector<float> &audioChunk)
     params.no_context = true ;
     params.single_segment = false;
     //排除空白token
-    params.suppress_blank = true;
-    params.suppress_nst = true;
+    //params.suppress_blank = true;
+    //params.suppress_nst = true;
     params.audio_ctx = 278 ;
     //解码与置信度阈值，防止幻觉
-    params.temperature = 0.0f;
-    params.temperature_inc = 0.2f;
-    params.entropy_thold = 2.4f;
-    params.logprob_thold = -1.0f;
+    //params.temperature = 0.0f;
+    //params.temperature_inc = 0.2f;
+    //params.entropy_thold = 2.4f;
+    //params.logprob_thold = -1.0f;
     setpriority(PRIO_PROCESS, 0, -10);
     qDebug() << "Calling whisper_full with" << audioChunk.size() << "samples";
     //int result = whisper_full(m_ctx, params, audioChunk.data(), audioChunk.size());
