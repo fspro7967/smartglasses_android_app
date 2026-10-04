@@ -61,6 +61,11 @@ public:
     // 用户主动停止不是错误，因此**不发 failed()**。
     void stop();
 
+    // 蓝牙回传背压：暂停/恢复 PCM 排空。暂停时不再发 audioChunk，worker 仍可把当前
+    // 句子合成进有界队列；恢复后继续排空。用于在蓝牙队列积压时**从源头**停止喂数据——
+    // 只暂停本机 sink 是挡不住 audioChunk 直接入蓝牙队列的（那才是积压溢出的成因）。
+    void setDrainPaused(bool paused);
+
 signals:
     // 增量 PCM：int16 单声道小端。sampleRate 与 QAudioFormat 对应。
     void audioChunk(const QByteArray &pcm, int sampleRate);
@@ -105,6 +110,8 @@ private:
 
     QTimer *m_drainTimer = nullptr;
     QFuture<void> m_future;
+    // 背压暂停：为真时 drainQueue 不发出 data，排空定时器也停住（见 setDrainPaused）
+    bool m_drainPaused = false;
 
     // 同一时刻只允许一个 worker 在用 tts 句柄
     std::atomic_bool m_generating{false};

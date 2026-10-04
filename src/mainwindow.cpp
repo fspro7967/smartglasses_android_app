@@ -161,6 +161,21 @@ MainWindow::MainWindow(QObject *parent)
         emit statusMessage("已停止蓝牙音频回传: " + reason);
     });
 
+    // 蓝牙回传队列降回低水位：解除背压，马上继续把积压的音频交给本机 sink 并推进合成
+    connect(m_deviceHandler, &DeviceHandler::streamLowWater, this, [this]() {
+        setBleBackpressured(false);
+        if (m_speaking || !m_pendingPcm.isEmpty()) {
+            writePendingAudio();
+            if (!m_pendingPcm.isEmpty() && m_audioPump && !m_audioPump->isActive())
+                m_audioPump->start();
+        }
+    });
+
+    // 蓝牙回传队列发空：若朗读其余条件已满足，此刻才真正收尾（让开发板 stop）
+    connect(m_deviceHandler, &DeviceHandler::streamDrained, this, [this]() {
+        maybeFinishSpeaking();
+    });
+
     connect(m_deviceHandler, &DeviceHandler::connected, this, [this]() {
         m_isConnected = true;
         m_deviceName = m_pendingDeviceName;
@@ -282,7 +297,8 @@ void MainWindow::setWriteTarget(const QString &serviceUuid, const QString &charU
     // 开发板的控制特征只收发文本指令，不接受下行音频；误选它会把音频字节喂给
     // 指令解析器。开发板的下行目标固定是播放特征，控制指令由 boardPlayIfNeeded()
     // 单独发送（见 configureBoard）。
-    if (m_board && charUuid == QLatin1String(BoardProtocol::kControlCharUuid)) {
+    // UI 传来的是带花括号的 QBluetoothUuid::toString() 格式，按 UUID 而非字符串比较。
+    if (m_board && QBluetoothUuid(charUuid) == QBluetoothUuid(QLatin1String(BoardProtocol::kControlCharUuid))) {
         emit statusMessage("开发板控制特征仅用于指令，音频回传请选择播放特征");
         return;
     }
@@ -317,6 +333,7 @@ void MainWindow::setBleAudioOut(bool enabled)
     if (m_bleAudioOut == enabled)
         return;
     m_bleAudioOut = enabled;
+    setBleBackpressured(false);
 
     if (!enabled) {
         m_deviceHandler->clearStreamQueue();   // 关闭即静音：丢掉还没发出去的音频
@@ -348,6 +365,18 @@ void MainWindow::applyAudioVolume()
 {
     if (m_audioSink)
         m_audioSink->setVolume(m_bleAudioOut ? 0.0 : 1.0);
+}
+
+void MainWindow::setBleBackpressured(bool backpressured)
+{
+    if (m_bleBackpressured == backpressured)
+        return;
+    m_bleBackpressured = backpressured;
+    // 关键：背压必须作用到合成源头。onAudioChunk() 是「一收到 audioChunk 就整块入
+    // 蓝牙队列」，只暂停本机 sink 只是让它不再消耗 m_pendingPcm，挡不住当前这句继续
+    // 被排空进蓝牙队列——那正是队列涨到积压上限、触发 streamAborted 的成因。
+    if (m_synthesizer)
+        m_synthesizer->setDrainPaused(backpressured);
 }
 
 void MainWindow::enableNotification(const QString &serviceUuid, const QString &charUuid)
@@ -488,13 +517,22 @@ void MainWindow::configureBoard()
         "已识别开发板 ESP32_Audio：播放特征设为回传目标，麦克风通知已开启"));
 }
 
-// 回传采样率：开发板固件固定 16 kHz 解码播放特征；其他设备沿用 TTS 模型采样率。
+// 回传采样率：发 TTS 模型的原生采样率，不升采样。
+//
+// 开发板也一样——以前这里固定返回 16 kHz 并在手机上升采样，码率 32 KB/s，
+// 超过 Qt Android 串行写入的持续吞吐（实测约 24 KB/s），队列必然积压。现在手机
+// 发原生 8 kHz（16 KB/s），由固件按 rate:N 指令线性插值到 I2S 的 16 kHz。
+// 模型采样率若不是 16000 的整数约数（固件插不了），退回 16 kHz 并在手机侧重采样。
 int MainWindow::bleStreamSampleRate() const
 {
-    if (m_board)
-        return BoardProtocol::kSampleRate;
     const int modelRate = m_synthesizer ? m_synthesizer->sampleRate() : 0;
-    return modelRate > 0 ? modelRate : 8000;
+    const int rate = modelRate > 0 ? modelRate : 8000;
+    if (m_board) {
+        const int max = BoardProtocol::kMaxDownlinkRate;
+        if (rate > max || max % rate != 0)
+            return max;
+    }
+    return rate;
 }
 
 // 一轮播放开始前给开发板发 "play"（固件收到前会丢弃播放特征上的音频）。
@@ -507,7 +545,13 @@ bool MainWindow::boardPlayIfNeeded()
     if (m_boardPlaying)
         return true;
 
+    // 先告知下行采样率（播放中固件会拒绝切换，所以必须在 play 之前）。
+    // 两条指令走同一条控制特征、同一个串行 IO 队列，到达顺序即发送顺序。
+    const QByteArray rateCmd = QByteArray(BoardProtocol::kCmdRatePrefix)
+                               + QByteArray::number(bleStreamSampleRate());
     if (m_boardControlServiceUuid.isEmpty()
+        || !m_deviceHandler->writeControlValue(m_boardControlServiceUuid,
+                                               m_boardControlCharUuid, rateCmd)
         || !m_deviceHandler->writeControlValue(m_boardControlServiceUuid,
                                                m_boardControlCharUuid,
                                                QByteArray(BoardProtocol::kCmdPlay))) {
@@ -809,6 +853,9 @@ void MainWindow::onAudioChunk(const QByteArray &pcm, int sampleRate)
         m_deviceHandler->enqueueStreamData(
             sampleRate == outRate ? pcm
                                   : resampleLinearLe(pcm, sampleRate, outRate));
+        // 入队后越过高水位就立刻进入背压（暂停合成排空 + 本机 sink）
+        if (m_deviceHandler->streamQueuedBytes() > m_deviceHandler->streamHighWaterBytes())
+            setBleBackpressured(true);
     }
 
     // 模型采样率与设备采样率不一致时，在这里补一次重采样。
@@ -849,8 +896,25 @@ void MainWindow::writePendingAudio()
     // 所以直接无条件调用即可，行为等价且不受这次改名影响。
     m_audioSink->resume();
 
+    // 蓝牙回传背压。回传开启时本机 sink 是静音的「节拍器」，但它按 1× 实时速度
+    // 消耗 m_pendingPcm，合成的推进也随之按实时速度走；若蓝牙吞吐低于实时码率
+    // （WriteWithResponse 逐包等 ACK 时很常见），回传队列就会越积越高，直到
+    // 触发溢出保护并把回传整个关掉。
+    //
+    // 所以队列越过高水位时**暂停给 sink 喂数据**：m_pendingPcm 不再消耗，
+    // 涨过 kBacklogLowWaterBytes 后 speakNextSentence() 的闸门就会让合成暂停；
+    // 蓝牙队列降到低水位（streamLowWater 信号）再恢复。这样整条流水线由
+    // 蓝牙的真实排空速度驱动，回传不会溢出，也不会丢音频。
+    bool btGated = false;
+    if (m_bleAudioOut && m_bleBackpressured) {
+        if (m_deviceHandler->streamQueuedBytes() <= m_deviceHandler->streamLowWaterBytes())
+            setBleBackpressured(false);    // 兜底：信号丢失时靠定时器自行恢复
+        else
+            btGated = true;
+    }
+
     qint64 writtenTotal = 0;
-    while (!m_pendingPcm.isEmpty()) {
+    while (!btGated && !m_pendingPcm.isEmpty()) {
         const qsizetype free = m_audioSink->bytesFree();
         if (free <= 0)
             break;                       // 设备缓冲满了，剩下的留到下次
@@ -864,7 +928,8 @@ void MainWindow::writePendingAudio()
 
     // 设备无响应检测：有积压却连续几秒一个字节都写不进去。见
     // kStalledTicksBeforeGivingUp 的说明——这是背压闸门引入的失败模式。
-    if (m_speaking && !m_pendingPcm.isEmpty() && writtenTotal == 0) {
+    // 被蓝牙背压主动暂停的写入不算设备无响应（蓝牙真卡死由 streamAborted 兜底）。
+    if (m_speaking && !m_pendingPcm.isEmpty() && writtenTotal == 0 && !btGated) {
         if (++m_stalledTicks >= kStalledTicksBeforeGivingUp) {
             m_stalledTicks = 0;
             emit statusMessage("音频输出无响应，已停止朗读");
@@ -902,6 +967,13 @@ void MainWindow::maybeFinishSpeaking()
         return;                        // 还有句子在合成中
     if (!m_pendingPcm.isEmpty())
         return;                        // 还有音频没交给设备
+
+    // 回传时，音频「交给本机 sink」不等于「已发到眼镜」：蓝牙队列里可能还有
+    // 最长一个高水位（约 1.5 秒）的尾音。此刻 setSpeaking(false) 会触发开发板
+    // stop，把这段尾音截掉，所以等 streamDrained 再收尾（见构造函数里的连接）。
+    // 这只影响自然结束；用户主动停止走 stopSpeaking()，已先清空队列，立即生效。
+    if (m_bleAudioOut && m_deviceHandler->streamQueuedBytes() > 0)
+        return;
 
     setSpeaking(false);
 }
@@ -1004,6 +1076,7 @@ void MainWindow::stopSpeaking()
     stopPlayback();
     // 回传的音频必须跟着一起停：否则「停止」之后眼镜还会把已排队的几秒播完
     m_deviceHandler->clearStreamQueue();
+    setBleBackpressured(false);
     setSpeaking(false);
 }
 

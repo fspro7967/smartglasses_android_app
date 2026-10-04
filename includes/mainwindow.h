@@ -159,6 +159,9 @@ private:
     void maybeFinishSpeaking();
     // 朗读状态的唯一写入口，避免「改标志 + 发信号」这套动作散落多处
     void setSpeaking(bool speaking);
+    // 蓝牙回传背压状态切换：置位/清位 m_bleBackpressured 的同时暂停/恢复合成排空，
+    // 从源头止住 audioChunk 灌进蓝牙队列（只挡本机 sink 是挡不住的）。
+    void setBleBackpressured(bool backpressured);
 
     DeviceHandler *m_deviceHandler;
     MsgSender *m_msgsender;
@@ -187,6 +190,8 @@ private:
     // 只在「收到新音频块」时才写的话，合成一停下来尾部就永远写不出去了。
     QTimer *m_audioPump = nullptr;
     QByteArray m_pendingPcm;            // 设备一时写不进去时暂存
+    // 蓝牙回传队列越过高水位：暂停喂本机 sink，并暂停合成排空，让整条流水线等蓝牙
+    bool m_bleBackpressured = false;
     int m_audioSampleRate = 0;          // 实际喂给设备的采样率
     bool m_needResample = false;        // 设备不支持模型采样率时置位
     QStringList m_speakQueue;           // 本次回复切出的句子

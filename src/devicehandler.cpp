@@ -10,8 +10,9 @@ namespace {
 constexpr int kOneShotWriteIntervalMs = 15;
 
 // 流式音频发包节拍的下限来源是发送字节率（见 DeviceHandler::m_streamByteRate）：
-// 默认 8 kHz 单声道 int16 = 16000 字节/秒；开发板要求 16 kHz 时由 MainWindow
-// 通过 setStreamByteRate() 提到 32000。发送必须比音频产生快，积压才不会被耗尽。
+// 默认 8 kHz 单声道 int16 = 16000 字节/秒，由 MainWindow 通过 setStreamByteRate()
+// 按实际回传采样率设置。开发板也发 8 kHz（板上插值到 16 kHz），因为 Qt Android
+// 串行化写入，持续吞吐实测只有约 24 KB/s，撑不住 32 KB/s。
 
 // 发送速率相对音频码率的目标倍率。取 1.5 留出余量：
 // 蓝牙连接间隔抖动、重传都会吃掉带宽，刚好等于码率意味着队列只会越堆越高。
@@ -28,6 +29,25 @@ constexpr int kStreamMaxTickMs = 50;
 // 它是安全阀而非常规路径——正常时队列只会有几十毫秒的数据（见 streamTickIntervalMs）。
 // 到上限说明蓝牙吞吐确实跟不上音频产生速率，此时停止接收并上报，而不是让内存涨下去。
 constexpr int kStreamQueueSeconds = 4;
+
+// 背压水位（毫秒音频）。高水位 1500 ms：队列超过它，调用方应暂停产生音频；
+// 低水位 500 ms：降到它以下再恢复。两者之间留出滞回区间，避免在阈值附近
+// 反复启停；且高水位远低于 kStreamQueueSeconds，背压正常生效时永远触达不到溢出。
+constexpr int kStreamHighWaterMs = 1500;
+constexpr int kStreamLowWaterMs  = 500;
+
+// 无响应写入允许同时在途（已交给 Qt、未收到完成回调）的流式分片数。
+// 太小会让 Android 栈每个连接事件吃不满；太大则 Java 队列里又会悄悄堆积。
+// 4 包 ≈ 2 KB（MTU 517 时），约 60 ms 的音频，足够流水线满速而延迟可忽略。
+constexpr int kMaxInflightChunks = 4;
+
+// 在途数长时间不下降（完成回调丢了）时强制清零，避免发送永久停住。
+// 略大于 Qt 自己的 3 秒 IO 超时。
+constexpr int kInflightStallMs = 3500;
+
+// 连续多少次写入错误才判定链路坏了。单次错误（例如 Qt 的 3 秒 IO 超时）常见且
+// 可恢复，丢掉那一包继续即可；连续失败才说明目标真的写不进去。
+constexpr int kMaxConsecutiveWriteErrors = 5;
 
 } // namespace
 
@@ -307,6 +327,9 @@ bool DeviceHandler::enqueueStreamData(const QByteArray &data)
     const qint64 maxQueuedBytes = qint64(m_streamByteRate) * kStreamQueueSeconds;
     if (m_streamQueuedBytes + data.size() > maxQueuedBytes) {
         m_streamOverflowed = true;
+        qWarning().nospace() << "[BLE-ABORT] 原因=队列溢出 queued=" << m_streamQueuedBytes
+                             << "B incoming=" << data.size() << "B limit=" << maxQueuedBytes
+                             << "B need=" << m_streamByteRate << "B/s";
         emit streamAborted(QString("蓝牙吞吐不足，回传队列积压 %1 KiB")
                            .arg(m_streamQueuedBytes / 1024));
         return false;
@@ -321,14 +344,83 @@ bool DeviceHandler::enqueueStreamData(const QByteArray &data)
         m_streamQueuedBytes += chunk.data.size();
     }
 
+    m_streamWasActive = true;
+    if (m_streamQueuedBytes > streamHighWaterBytes())
+        m_streamAboveHighWater = true;
+
     startSendingIfIdle();
     return true;
 }
 
+qint64 DeviceHandler::streamHighWaterBytes() const
+{
+    return qint64(m_streamByteRate) * kStreamHighWaterMs / 1000;
+}
+
+qint64 DeviceHandler::streamLowWaterBytes() const
+{
+    return qint64(m_streamByteRate) * kStreamLowWaterMs / 1000;
+}
+
+void DeviceHandler::updateStreamWatermarks()
+{
+    if (m_streamAboveHighWater && m_streamQueuedBytes <= streamLowWaterBytes()) {
+        m_streamAboveHighWater = false;
+        emit streamLowWater();
+    }
+}
+
+// 每秒打印一次：出队字节率 vs 音频所需字节率，以及 MTU / 写入模式 / 队列水位。
+// 判读：
+//   out ≈ need            → 蓝牙吞吐够，积压另有原因
+//   out 明显 < need       → 蓝牙是瓶颈；再看 chunk：
+//       chunk≈20          → MTU 没协商上去
+//       chunk≈500 仍不够  → 连接间隔过大（Android 默认 30~50 ms）或走了有响应写
+void DeviceHandler::logStreamThroughput(int bytesJustSent)
+{
+    // 空闲间隙不算吞吐：队列排空后到下一批音频到达之间什么都没发，若把这段
+    // 时间计入窗口，out 会被摊薄成一个看起来像「卡顿」的假低值。
+    // 相邻两次出队间隔超过 kStatIdleGapMs 就认为中间空闲过，窗口重新开始。
+    constexpr qint64 kStatIdleGapMs = 200;
+    if (m_statLastSend.isValid() && m_statLastSend.elapsed() > kStatIdleGapMs) {
+        m_statTimer.invalidate();
+        m_statBytes = 0;
+        m_statChunks = 0;
+    }
+    m_statLastSend.restart();
+
+    if (!m_statTimer.isValid())
+        m_statTimer.start();
+    m_statBytes += bytesJustSent;
+    ++m_statChunks;
+
+    const qint64 ms = m_statTimer.elapsed();
+    if (ms < 1000)
+        return;
+    qDebug().nospace()
+        << "[BLE-TX] out=" << (m_statBytes * 1000 / ms) << " B/s"
+        << " need=" << m_streamByteRate << " B/s"
+        << " chunk=" << writeChunkSize() << "B"
+        << " mtu=" << (m_controller ? m_controller->mtu() : -1)
+        << " mode=" << (m_writeMode == QLowEnergyService::WriteWithResponse
+                        ? "WithResponse" : "NoResponse")
+        << " pkts/s=" << (m_statChunks * 1000 / ms)
+        << " queued=" << m_streamQueuedBytes << "B";
+    m_statBytes = 0;
+    m_statChunks = 0;
+    m_statTimer.restart();
+}
+
 void DeviceHandler::clearStreamQueue()
 {
+    m_statTimer.invalidate();
+    m_statLastSend.invalidate();
+    m_statBytes = 0;
+    m_statChunks = 0;
     m_streamQueuedBytes = 0;
     m_streamOverflowed = false;
+    m_streamAboveHighWater = false;
+    m_streamWasActive = false;
     // 只摘掉流式分片，保留 writeData() 排队中的普通下行数据（顺序不变）。
     // m_writeInFlight 不动：已发出的那包仍在等确认，由 onCharacteristicWritten 收尾。
     for (int i = m_writeQueue.size() - 1; i >= 0; --i) {
@@ -386,13 +478,32 @@ void DeviceHandler::sendNextWriteChunk()
         return;
     }
 
+    // 无响应写入的闭环流控：在途分片已达上限就先不发，等 characteristicWritten
+    // 回来（onCharacteristicWritten 会再次调用本函数）。定时器继续按节拍兜底重试。
+    if (m_writeMode == QLowEnergyService::WriteWithoutResponse
+            && !m_writeQueue.first().oneShot
+            && m_inflightChunks >= kMaxInflightChunks) {
+        if (m_lastAckTimer.isValid() && m_lastAckTimer.elapsed() > kInflightStallMs) {
+            qWarning() << "[BLE-TX] 完成回调停滞超过" << kInflightStallMs
+                       << "ms，重置在途计数 inflight=" << m_inflightChunks;
+            m_inflightChunks = 0;      // 回调丢了：放行，避免永久停住
+        } else {
+            if (!m_writeTimer->isActive())
+                m_writeTimer->start();
+            return;
+        }
+    }
+
     const WriteChunk chunk = m_writeQueue.takeFirst();
-    if (!chunk.oneShot)
+    if (!chunk.oneShot) {
         m_streamQueuedBytes -= chunk.data.size();
+        updateStreamWatermarks();
+    }
 
     if (m_writeMode == QLowEnergyService::WriteWithoutResponse) {
-        // 无响应写入没有完成回调，只能靠定时器控制节拍：普通下行沿用固定间隔，
-        // 流式音频按 MTU 自适应（见 streamTickIntervalMs）。
+        // 无响应写入的节拍由定时器给出：普通下行沿用固定间隔，流式音频按 MTU
+        // 自适应（见 streamTickIntervalMs）。流式分片另有完成回调约束的在途上限
+        // （kMaxInflightChunks），定时器只决定「最快多快」，回调决定「实际多快」。
         m_writeTimer->setInterval(chunk.oneShot ? kOneShotWriteIntervalMs
                                                 : streamTickIntervalMs());
     } else {
@@ -400,11 +511,19 @@ void DeviceHandler::sendNextWriteChunk()
     }
 
     m_writeService->writeCharacteristic(m_writeCharacteristic, chunk.data, m_writeMode);
+    if (!chunk.oneShot) {
+        if (m_writeMode == QLowEnergyService::WriteWithoutResponse) {
+            if (m_inflightChunks == 0)
+                m_lastAckTimer.restart();      // 从空闲到有在途：以此刻起计停滞
+            ++m_inflightChunks;
+        }
+        logStreamThroughput(chunk.data.size());
+    }
 
     if (m_writeMode != QLowEnergyService::WriteWithoutResponse)
         return;                            // WriteWithResponse 模式：等 characteristicWritten 确认后再发下一包
 
-    // 无响应模式没有完成回调，由定时器按节拍继续发送剩余分片；
+    // 无响应模式由定时器按节拍继续发送剩余分片（流式分片同时受在途上限约束）；
     // 若队列已空，停止定时器并立即收尾，避免重复触发 writeFinished
     if (!m_writeQueue.isEmpty()) {
         m_writeTimer->start();
@@ -419,6 +538,12 @@ void DeviceHandler::finishOneShotWriteIfDone()
     // 队列排空意味着积压已经清掉，下一次回传可以重新尝试（上限只是安全阀）
     m_streamOverflowed = false;
 
+    // 流式队列发空：通知朗读收尾方可以安全让开发板 stop 了（尾音已全部写出）
+    if (m_streamWasActive) {
+        m_streamWasActive = false;
+        emit streamDrained();
+    }
+
     if (!m_oneShotPending)
         return;
     m_oneShotPending = false;
@@ -431,8 +556,12 @@ void DeviceHandler::clearWriteQueue()
     m_writeQueue.clear();
     m_streamQueuedBytes = 0;
     m_streamOverflowed = false;
+    m_streamAboveHighWater = false;
+    m_streamWasActive = false;
     m_oneShotPending = false;
     m_writeInFlight = false;
+    m_inflightChunks = 0;
+    m_consecutiveWriteErrors = 0;
 }
 
 void DeviceHandler::onWriteTimerTimeout()
@@ -444,10 +573,22 @@ void DeviceHandler::onCharacteristicWritten(const QLowEnergyCharacteristic &c,
                                             const QByteArray &value)
 {
     Q_UNUSED(value);
-    if (m_writeMode != QLowEnergyService::WriteWithResponse)
-        return;
     if (!m_writeCharacteristic.isValid() || c.uuid() != m_writeCharacteristic.uuid())
         return;
+
+    m_consecutiveWriteErrors = 0;          // 有一包成功写出，链路是通的
+
+    if (m_writeMode == QLowEnergyService::WriteWithoutResponse) {
+        // Qt Android 对无响应写入同样会发完成回调（Android 栈本地处理完这一包），
+        // 用它做在途计数的闭环。oneShot 分片不计入在途，所以这里只在计数>0 时递减。
+        if (m_inflightChunks > 0)
+            --m_inflightChunks;
+        m_lastAckTimer.restart();
+        // 在途数腾出空位，马上补发，不必干等下一拍定时器
+        if (!m_writeQueue.isEmpty() && m_writeQueue.first().oneShot == false)
+            sendNextWriteChunk();
+        return;
+    }
 
     m_writeInFlight = false;
     // 队列可能已空（普通下行收尾）也可能还有分片，交给 sendNextWriteChunk 判断
@@ -459,12 +600,36 @@ void DeviceHandler::onServiceError(QLowEnergyService::ServiceError error)
     // 仅在正在向下行目标写入时报错（其他读/写/描述符操作不归本模块管）
     if (m_writeService != qobject_cast<QLowEnergyService*>(sender()))
         return;
-    if (m_writeQueue.isEmpty())
+    if (m_writeQueue.isEmpty() && m_inflightChunks == 0)
         return;
 
-    // 流式音频报错时还要额外上报：写失败会一直失败，继续按真实时间喂数据
-    // 只会反复报错。让调用方关掉回传才是出口。
-    const bool wasStreaming = m_streamQueuedBytes > 0 || m_streamOverflowed;
+    const bool wasStreaming = m_streamQueuedBytes > 0 || m_streamOverflowed
+                              || m_inflightChunks > 0;
+
+    // 流式音频的单次写入错误很常见且可恢复：Qt 的 3 秒 IO 超时、Android 栈偶发
+    // 忙都会上报 CharacteristicWriteError，但后面的包照样能写出去。以前这里一次
+    // 就清空队列并中止回传，表现为「跑一阵子就自己掉回本机播放，而且每次时长不定」。
+    // 现在只在**连续**多次失败（没有任何一包成功写出）时才判定链路真的坏了。
+    // 成功回调会在 onCharacteristicWritten 里把计数清零。
+    if (wasStreaming) {
+        ++m_consecutiveWriteErrors;
+        // 这一包出错也会收到一次完成/错误回调，不会再递减在途数，这里补上
+        if (m_inflightChunks > 0)
+            --m_inflightChunks;
+        qWarning().nospace() << "[BLE-WRITE-ERR] error=" << int(error)
+                             << " 连续=" << m_consecutiveWriteErrors << "/"
+                             << kMaxConsecutiveWriteErrors
+                             << " queued=" << m_streamQueuedBytes << "B inflight="
+                             << m_inflightChunks;
+        if (m_consecutiveWriteErrors < kMaxConsecutiveWriteErrors)
+            return;                        // 容忍：丢这一包，继续发后面的
+    }
+
+    qWarning().nospace() << "[BLE-ABORT] 原因=服务写入错误 error=" << int(error)
+                         << " 连续=" << m_consecutiveWriteErrors
+                         << " queued=" << m_streamQueuedBytes << "B streaming=" << wasStreaming
+                         << " mode=" << (m_writeMode == QLowEnergyService::WriteWithResponse
+                                         ? "WithResponse" : "NoResponse");
 
     clearWriteQueue();
     emit writeError("特征写入失败，错误码: " + QString::number(int(error)));
@@ -582,8 +747,15 @@ void DeviceHandler::onCharacteristicChanged(const QLowEnergyCharacteristic &c, c
 // ---------- 辅助函数 ----------
 QLowEnergyService* DeviceHandler::findService(const QString &uuid) const
 {
+    // 必须按 QBluetoothUuid 比较，不能比字符串：Qt 6 的 QBluetoothUuid::toString()
+    // 返回带花括号的 "{4fafc201-...}"，而 BoardProtocol 的常量不带花括号，
+    // 字符串比较永远不等，开发板自动识别因此失效。QBluetoothUuid(QString) 两种写法都能解析，
+    // 且 QUuid 比较不区分大小写。
+    const QBluetoothUuid target{uuid};
+    if (target.isNull())
+        return nullptr;
     for (QLowEnergyService *s : m_services) {
-        if (s->serviceUuid().toString() == uuid)
+        if (s->serviceUuid() == target)
             return s;
     }
     return nullptr;
