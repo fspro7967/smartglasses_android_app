@@ -147,9 +147,29 @@ bool SpeechSynthesizer::synthesizeSentence(const QString &text)
 
     // 上一句的 worker 可能还没退出（于是 tryStartWorker 空转），
     // 必须保证排空定时器在跑，否则这句话会被永久搁置。
-    if (!m_drainTimer->isActive())
+    // 但背压暂停期间不能重新启动：否则新句子会绕过背压继续塞进蓝牙队列。
+    if (!m_drainPaused && !m_drainTimer->isActive())
         m_drainTimer->start();
     return true;
+}
+
+// 蓝牙回传背压：为真时停止排空（不发 audioChunk），为假时恢复。
+// 暂停只停「把 PCM 交给下游」这一步；worker 仍可把当前句子写进有界队列，
+// 恢复后会继续排空，音频不丢。这是把蓝牙积压反馈到合成源头，而不是等队列溢出中止回传。
+void SpeechSynthesizer::setDrainPaused(bool paused)
+{
+    if (m_drainPaused == paused)
+        return;
+    m_drainPaused = paused;
+    if (paused) {
+        if (m_drainTimer)
+            m_drainTimer->stop();
+        return;
+    }
+    // 恢复：只要还有未发完的 PCM 或仍在合成/排队，就重新起表。
+    // 空跑一拍后 drainQueue 会自行停表，无需在这里精确判断。
+    if (m_drainTimer && !m_drainTimer->isActive())
+        m_drainTimer->start();
 }
 
 void SpeechSynthesizer::stop()
@@ -171,6 +191,7 @@ void SpeechSynthesizer::stop()
     m_generationDone.store(false);
     m_generateFailed.store(false);
     m_overflowed.store(false);
+    m_drainPaused = false;      // 停止是彻底复位，别把「暂停」状态留给下一轮
 
     if (m_drainTimer)
         m_drainTimer->stop();
@@ -216,7 +237,7 @@ void SpeechSynthesizer::tryStartWorker()
     m_overflowed.store(false);
     m_generating.store(true);
 
-    if (!m_drainTimer->isActive())
+    if (!m_drainPaused && !m_drainTimer->isActive())
         m_drainTimer->start();
 
     m_future = QtConcurrent::run([this, sentence = std::move(next), generationId]() {
@@ -226,6 +247,11 @@ void SpeechSynthesizer::tryStartWorker()
 
 void SpeechSynthesizer::drainQueue()
 {
+    // 背压暂停：不起表也不发数据。定时器已在 setDrainPaused 里停掉，这里只是兜底
+    // （例如暂停发生在一次已排队的 timeout 之间），保证暂停期间绝不吐 audioChunk。
+    if (m_drainPaused)
+        return;
+
     QByteArray ready;
     {
         QMutexLocker locker(&m_pcmMutex);
