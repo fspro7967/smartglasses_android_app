@@ -93,6 +93,11 @@ build/
 */build/
 build-*/
 CMakeCache.txt
+
+# PlatformIO / ESP32 firmware build output
+.pio/
+.pioenvs/
+.piolibdeps/
 CMakeFiles/
 cmake_install.cmake
 compile_commands.json
