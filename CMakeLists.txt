@@ -35,11 +35,39 @@ set(PROJECT_SOURCES
 
 include_directories(./includes/)
 
-# 添加 whisper.cpp 子目录
-add_subdirectory(third_party/whisper.cpp)
+# ----------------------------------------------------------------------------
+# 编译选项：必须写在 add_subdirectory(whisper.cpp) 和所有目标创建**之前**
+# ----------------------------------------------------------------------------
+# 顺序在这里是语义，不是风格：
+#   * add_compile_options() 只作用于**之后**创建的目标（含之后加入的子目录）；
+#   * 子目录在 add_subdirectory() 那一刻拷走父目录的变量，之后父目录再改
+#     CMAKE_*_FLAGS_RELEASE，子目录看不到；
+#   * option()/缓存变量要在子目录读取它之前设好，否则首次配置用的是子目录自己的
+#     默认值，要到**第二次**配置才生效。
+# 这几条以前都写在文件末尾 / add_subdirectory 之后，结果是：-march 对应用和 whisper
+# 都不生效，-O3 只落到应用自身，OpenMP 在全新构建目录的首次配置里仍是开启的。
+
 # 禁用 OpenMP，避免依赖 libomp.so
 set(GGML_OPENMP OFF CACHE BOOL "Disable OpenMP for Android" FORCE)
-set(GGML_OPENMP OFF)
+
+if (ANDROID)
+    # Release 高度优化。whisper/ggml 里 C 与 C++ 源文件都有，两种语言都要设。
+    set(CMAKE_C_FLAGS_RELEASE   "${CMAKE_C_FLAGS_RELEASE} -O3")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
+
+    # ARM64：启用 FP16 与 DotProduct 指令集（whisper 的矩阵运算因此明显变快）。
+    #
+    # 注意这把最低硬件要求抬到了 ARMv8.2-A：只有 ARMv8.0 的老芯片（Cortex-A53/A57/
+    # A72/A73，如骁龙 835 及更早、多数 2018 年前的中低端机）会在执行到这些指令时
+    # 以 SIGILL 直接崩溃。这是有意接受的取舍，见 docs/adr/0004-require-armv8-2.md。
+    if (ANDROID_ABI STREQUAL "arm64-v8a")
+        add_compile_options(-march=armv8.2-a+fp16+dotprod)
+        add_definitions(-DGGML_USE_NEON)
+    endif()
+endif()
+
+# 添加 whisper.cpp 子目录
+add_subdirectory(third_party/whisper.cpp)
 
 file(GLOB_RECURSE SRC_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 file(GLOB_RECURSE HEADER_FILES ${CMAKE_CURRENT_SOURCE_DIR}/includes/*.h)
@@ -198,17 +226,6 @@ if (ANDROID AND QT_VERSION_MAJOR EQUAL 6)
                 COMMENT "Installing APK on connected device"
             )
         endif()
-    endif()
-endif()
-
-if (ANDROID)
-    # 开启 Release 高度优化
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
-
-    # 强制为 ARM64 启用 FP16 和 DotProduct 指令集支持
-    if (${ANDROID_ABI} STREQUAL "arm64-v8a")
-        add_compile_options(-march=armv8.2-a+fp16+dotprod)
-        add_definitions(-DGGML_USE_NEON)
     endif()
 endif()
 
