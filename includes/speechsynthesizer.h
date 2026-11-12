@@ -16,17 +16,18 @@ class QTimer;
 
 // 离线中文语音合成（sherpa-onnx + vits-icefall-zh-aishell3），与 WhisperManager 对称。
 //
-// 接口纪律 —— 这是硬要求，因为 WhisperManager 在同样三点上做错了，照抄会重犯：
+// 接口纪律 —— 这是硬要求（docs/architecture.md「贯穿各模块的纪律」）：
 //
 //   1. **静默是一种正常结果，不是错误。** 文本为空/纯空白时 synthesizeSentence()
-//      返回 false 且**不发 failed**。对照 whisper_manager.cpp:134-135，那里把
-//      「无识别结果」同时报成 errorOccurred 和一个文字哨兵值，逼调用方用字符串
-//      比较去判断正常路径。
+//      返回 false 且**不发 failed**。（反例仍在 WhisperManager::processBuffer：
+//      「无识别结果」同时报成 errorOccurred 和一个文字哨兵值，调用方只能靠字符串
+//      比较判断正常路径。）
 //   2. **进度不走错误通道。** 本类没有任何进度信号——界面看 audioChunk 即可。
-//      对照 whisper_manager.cpp:49，那里用 errorOccurred 上报日常喂入进度。
+//      （WhisperManager 曾用 errorOccurred 上报喂入进度，2026-11-11 已改为单独的
+//      segmentQueued 信号。）
 //   3. **init 的结果必须被消费。** ready()/isReady() 让调用方能**拒绝**在未就绪
-//      时调用合成。对照 mainwindow.cpp:63-67，那里拿到 init 失败后仍继续接活，
-//      错误随后按块重复涌现。
+//      时调用合成。（WhisperManager 曾在 init 失败后仍继续接活，2026-11-11 起同样
+//      用 isReady() 拒绝。）
 //
 // 线程模型：synthesizeSentence() 立即返回；合成在 QtConcurrent 的 worker 线程里
 // 跑（与仓库既有用法一致）。sherpa 的增量回调把 PCM 写进一个**有上限**的字节

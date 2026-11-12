@@ -147,6 +147,8 @@ ApplicationWindow {
 
             Button {
                 text: qsTr("选音频")
+                // 识别模型在后台加载，就绪前选了文件也无法识别
+                enabled: backend.whisperReady
                 onClicked: audioDialog.open()
                 contentItem: Text {
                     text: parent.text

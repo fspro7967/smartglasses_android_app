@@ -3,6 +3,8 @@
 #include <QTimer>
 #include <QBluetoothUuid>
 
+#include <utility>
+
 namespace {
 
 // 无响应模式下普通下行（一整条 AI 回复等）的发包间隔。
@@ -49,12 +51,22 @@ constexpr int kInflightStallMs = 3500;
 // 可恢复，丢掉那一包继续即可；连续失败才说明目标真的写不进去。
 constexpr int kMaxConsecutiveWriteErrors = 5;
 
+// 服务详情发现的总超时。正常几百毫秒到一两秒就全部完成；某个服务卡在
+// 「发现中」既不成功也不失败时，计数永远归不了零，serviceDetailsDiscoveryFinished
+// 就永远不发——开发板也就永远不会被识别，且没有任何提示。到点带着已发现的部分继续。
+constexpr int kDetailsDiscoveryTimeoutMs = 10000;
+
+// 在途写入记录的条数上限。记录只用于错误归属，回调万一丢了也不能让它无限增长：
+// 超过就丢最旧的（后果只是那一次错误可能归错路，不影响收发）。
+constexpr int kMaxInflightRecords = 64;
+
 } // namespace
 
 DeviceHandler::DeviceHandler(QObject *parent)
     : QObject(parent)
     , m_discoveryAgent(new QBluetoothDeviceDiscoveryAgent(this))
     , m_controller(nullptr)
+    , m_detailsTimer(new QTimer(this))
     , m_writeTimer(new QTimer(this))
 {
     connect(m_discoveryAgent, &QBluetoothDeviceDiscoveryAgent::deviceDiscovered,
@@ -66,6 +78,13 @@ DeviceHandler::DeviceHandler(QObject *parent)
 
     m_writeTimer->setInterval(kOneShotWriteIntervalMs);
     connect(m_writeTimer, &QTimer::timeout, this, &DeviceHandler::onWriteTimerTimeout);
+
+    m_detailsTimer->setSingleShot(true);
+    m_detailsTimer->setInterval(kDetailsDiscoveryTimeoutMs);
+    connect(m_detailsTimer, &QTimer::timeout, this, [this]() {
+        if (!m_detailsPending.isEmpty())
+            finishDetailsDiscovery(true);
+    });
 }
 
 DeviceHandler::~DeviceHandler()
@@ -104,11 +123,29 @@ void DeviceHandler::connectToDevice(const QBluetoothDeviceInfo &device)
     // 而旧控制器在异步删除期间仍可能发出 connected/errorOccurred 信号。
     connect(m_controller, &QLowEnergyController::connected, this,
             [this, controller = m_controller]() {
+        if (controller != m_controller)
+            return;   // 已被断开或被新连接取代的旧控制器，迟到的事件不作数
         emit statusChanged("Connected. Discovering services...");
         emit connected();
         controller->discoverServices();
     });
-    connect(m_controller, &QLowEnergyController::disconnected, this, [this]() {
+    connect(m_controller, &QLowEnergyController::disconnected, this,
+            [this, controller = m_controller]() {
+        // 三种情况：
+        //   1. controller 仍是当前控制器 —— 设备意外断开（超出范围、对端掉电）。
+        //      本对象的连接级状态必须在这里清掉，与主动断开走同一段复位：否则旧的
+        //      服务对象、写入目标、发送队列和「服务已发现」标志会一直留到下次连接。
+        //   2. m_controller 为空 —— 主动断开（disconnectDevice 已复位并置空），
+        //      这里只需把「真的断开了」通知出去。
+        //   3. m_controller 已是另一个控制器 —— 用户断开后马上连了别的设备，这是旧
+        //      控制器迟到的事件；转发出去会把新连接的界面状态冲掉，直接忽略。
+        if (m_controller && m_controller != controller)
+            return;
+        if (m_controller == controller) {
+            resetConnectionState();
+            m_controller = nullptr;
+            controller->deleteLater();
+        }
         emit statusChanged("Disconnected.");
         emit disconnected();
     });
@@ -126,57 +163,85 @@ void DeviceHandler::connectToDevice(const QBluetoothDeviceInfo &device)
 
 void DeviceHandler::disconnectDevice()
 {
-    // 关闭激活的特征通知
-    if (m_activeService && m_activeCharacteristic.isValid()) {
+    const bool linkUp = m_controller
+        && m_controller->state() != QLowEnergyController::UnconnectedState;
+
+    // 关闭激活的特征通知。链路已经断了就不必再写：只会换来一条写入错误。
+    if (linkUp && m_activeService && m_activeCharacteristic.isValid()) {
         enableCharacteristicNotification(m_activeService->serviceUuid().toString(),
                                          m_activeCharacteristic.uuid().toString(),
                                          false);
     }
-    m_activeService = nullptr;
-    m_activeCharacteristic = QLowEnergyCharacteristic();
 
-    // 清空下行写入状态（待发送队列、定时器、写入目标）
-    clearWriteQueue();
-    m_writeService = nullptr;
-    m_writeCharacteristic = QLowEnergyCharacteristic();
-
-    // 删除所有服务对象
-    qDeleteAll(m_services);
-    m_services.clear();
-    m_pendingServiceDetails = 0;
+    resetConnectionState();
 
     if (m_controller) {
         QLowEnergyController *controller = m_controller;
         m_controller = nullptr;
-        // disconnectFromDevice() 是异步操作，disconnected 信号在设备实际断开后才发出；
-        // 立即 delete 会导致信号丢失（UI 无法感知断开），改为收到信号后再延迟删除。
-        connect(controller, &QLowEnergyController::disconnected,
-                controller, &QObject::deleteLater);
-        controller->disconnectFromDevice();
+        if (linkUp) {
+            // disconnectFromDevice() 是异步操作，disconnected 信号在设备实际断开后才发出；
+            // 立即 delete 会导致信号丢失（UI 无法感知断开），改为收到信号后再延迟删除。
+            connect(controller, &QLowEnergyController::disconnected,
+                    controller, &QObject::deleteLater);
+            controller->disconnectFromDevice();
+        } else {
+            // 从未连上或早已断开：不会再有 disconnected 信号，等它只会把控制器漏掉。
+            controller->deleteLater();
+        }
     }
 }
 
-void DeviceHandler::enableCharacteristicNotification(const QString &serviceUuid,
+void DeviceHandler::resetConnectionState()
+{
+    m_activeService = nullptr;
+    m_activeCharacteristic = QLowEnergyCharacteristic();
+
+    m_controlService = nullptr;
+    m_controlCharacteristic = QLowEnergyCharacteristic();
+
+    // 清空下行写入状态（待发送队列、定时器、写入目标、在途记账）
+    clearWriteQueue();
+    m_writeService = nullptr;
+    m_writeCharacteristic = QLowEnergyCharacteristic();
+    m_inflightWrites.clear();
+
+    // 服务对象一律延迟删除：本函数可能正处在控制器/服务自己的信号发射途中
+    // （意外断开那条路），当场 delete 等于抽掉正在执行的对象。先断开信号，
+    // 保证它们在真正销毁前不会再回调进来、污染下一次连接的状态。
+    for (QLowEnergyService *service : std::as_const(m_services)) {
+        service->disconnect(this);
+        service->deleteLater();
+    }
+    m_services.clear();
+
+    m_detailsPending.clear();
+    m_detailsTimer->stop();
+    // 必须复位：留着 true 的话，下次连接里第一个服务的详情一到，就会被当成
+    // 「全部服务都已发现完」，过早触发 serviceDetailsDiscoveryFinished。
+    m_servicesDiscovered = false;
+}
+
+bool DeviceHandler::enableCharacteristicNotification(const QString &serviceUuid,
                                                      const QString &charUuid,
                                                      bool enable)
 {
     QLowEnergyService *service = findService(serviceUuid);
     if (!service) {
         qWarning() << "Service not found:" << serviceUuid;
-        return;
+        return false;
     }
 
     QLowEnergyCharacteristic characteristic = service->characteristic(QBluetoothUuid(charUuid));
     if (!characteristic.isValid()) {
         qWarning() << "Characteristic not found:" << charUuid;
-        return;
+        return false;
     }
 
     QLowEnergyDescriptor cccd = characteristic.descriptor(
         QBluetoothUuid::DescriptorType::ClientCharacteristicConfiguration);
     if (!cccd.isValid()) {
         qWarning() << "CCCD not found for characteristic:" << charUuid;
-        return;
+        return false;
     }
 
     if (enable) {
@@ -198,6 +263,7 @@ void DeviceHandler::enableCharacteristicNotification(const QString &serviceUuid,
         }
         emit statusChanged("Notification disabled for characteristic: " + charUuid);
     }
+    return true;
 }
 
 // ---------- 下行写入（AI 回复等 → 眼镜） ----------
@@ -245,38 +311,113 @@ bool DeviceHandler::servicePresent(const QString &uuid) const
     return findService(uuid) != nullptr;
 }
 
-bool DeviceHandler::writeControlValue(const QString &serviceUuid,
-                                      const QString &charUuid,
-                                      const QByteArray &data)
+bool DeviceHandler::characteristicPresent(const QString &serviceUuid,
+                                          const QString &charUuid) const
 {
-    if (data.isEmpty())
-        return false;
+    const QLowEnergyService *service = findService(serviceUuid);
+    return service && service->characteristic(QBluetoothUuid(charUuid)).isValid();
+}
+
+bool DeviceHandler::setControlChannel(const QString &serviceUuid, const QString &charUuid)
+{
+    clearControlChannel();
 
     QLowEnergyService *service = findService(serviceUuid);
     if (!service) {
-        emit writeError("控制指令服务不存在: " + serviceUuid);
+        qWarning() << "Control service not found:" << serviceUuid;
         return false;
     }
 
     const QLowEnergyCharacteristic ch = service->characteristic(QBluetoothUuid(charUuid));
     if (!ch.isValid()) {
-        emit writeError("控制指令特征不存在: " + charUuid);
+        qWarning() << "Control characteristic not found:" << charUuid;
         return false;
     }
 
     const auto props = ch.properties();
     if (!(props & (QLowEnergyCharacteristic::Write
                    | QLowEnergyCharacteristic::WriteNoResponse))) {
-        emit writeError("控制指令特征不可写: " + charUuid);
+        qWarning() << "Control characteristic is not writable:" << charUuid;
         return false;
     }
 
-    const QLowEnergyService::WriteMode mode =
-        (props & QLowEnergyCharacteristic::WriteNoResponse)
-            ? QLowEnergyService::WriteWithoutResponse
-            : QLowEnergyService::WriteWithResponse;
-    service->writeCharacteristic(ch, data, mode);
+    // 回执只走 notify：不能通知就无从确认指令是否生效，这条通道不算可用。
+    const QLowEnergyDescriptor cccd = ch.descriptor(
+        QBluetoothUuid::DescriptorType::ClientCharacteristicConfiguration);
+    if (!(props & QLowEnergyCharacteristic::Notify) || !cccd.isValid()) {
+        qWarning() << "Control characteristic cannot notify:" << charUuid;
+        return false;
+    }
+
+    service->writeDescriptor(cccd, QByteArray::fromHex("0100"));
+    m_controlService = service;
+    m_controlCharacteristic = ch;
     return true;
+}
+
+void DeviceHandler::clearControlChannel()
+{
+    m_controlService = nullptr;
+    m_controlCharacteristic = QLowEnergyCharacteristic();
+    dropInflight(InflightFilter::ControlOnly);
+}
+
+bool DeviceHandler::writeControlValue(const QByteArray &data)
+{
+    if (data.isEmpty() || !m_controlService || !m_controlCharacteristic.isValid())
+        return false;
+
+    // 指令短且少，可靠性优先于速度：支持有响应写就用它，失败时有明确的错误回调。
+    // （音频分片正相反，优先无响应写，见 setWriteTarget。）
+    const QLowEnergyService::WriteMode mode =
+        (m_controlCharacteristic.properties() & QLowEnergyCharacteristic::Write)
+            ? QLowEnergyService::WriteWithResponse
+            : QLowEnergyService::WriteWithoutResponse;
+    m_controlService->writeCharacteristic(m_controlCharacteristic, data, mode);
+    noteInflight(WriteKind::Control, m_controlService);
+    return true;
+}
+
+// ---------- 在途写入记账 ----------
+void DeviceHandler::noteInflight(WriteKind kind, QLowEnergyService *service)
+{
+    InflightWrite record;
+    record.kind = kind;
+    record.service = service;
+    m_inflightWrites.append(record);
+    while (m_inflightWrites.size() > kMaxInflightRecords)
+        m_inflightWrites.removeFirst();
+}
+
+DeviceHandler::WriteKind DeviceHandler::takeInflight(QLowEnergyService *service,
+                                                     InflightFilter filter)
+{
+    for (int i = 0; i < m_inflightWrites.size(); ++i) {
+        const InflightWrite &record = m_inflightWrites.at(i);
+        if (record.service != service)
+            continue;
+        const bool isControl = (record.kind == WriteKind::Control);
+        if ((filter == InflightFilter::ControlOnly && !isControl)
+                || (filter == InflightFilter::DataOnly && isControl)) {
+            continue;
+        }
+        const WriteKind kind = record.kind;
+        m_inflightWrites.removeAt(i);
+        return kind;
+    }
+    return WriteKind::None;
+}
+
+void DeviceHandler::dropInflight(InflightFilter filter)
+{
+    for (int i = m_inflightWrites.size() - 1; i >= 0; --i) {
+        const bool isControl = (m_inflightWrites.at(i).kind == WriteKind::Control);
+        if (filter == InflightFilter::Any
+                || (filter == InflightFilter::ControlOnly && isControl)
+                || (filter == InflightFilter::DataOnly && !isControl)) {
+            m_inflightWrites.removeAt(i);
+        }
+    }
 }
 
 void DeviceHandler::writeData(const QByteArray &data)
@@ -487,6 +628,7 @@ void DeviceHandler::sendNextWriteChunk()
             qWarning() << "[BLE-TX] 完成回调停滞超过" << kInflightStallMs
                        << "ms，重置在途计数 inflight=" << m_inflightChunks;
             m_inflightChunks = 0;      // 回调丢了：放行，避免永久停住
+            dropInflight(InflightFilter::DataOnly);   // 记账跟着清，否则归属会错位
         } else {
             if (!m_writeTimer->isActive())
                 m_writeTimer->start();
@@ -511,6 +653,7 @@ void DeviceHandler::sendNextWriteChunk()
     }
 
     m_writeService->writeCharacteristic(m_writeCharacteristic, chunk.data, m_writeMode);
+    noteInflight(chunk.oneShot ? WriteKind::OneShot : WriteKind::Stream, m_writeService);
     if (!chunk.oneShot) {
         if (m_writeMode == QLowEnergyService::WriteWithoutResponse) {
             if (m_inflightChunks == 0)
@@ -562,6 +705,8 @@ void DeviceHandler::clearWriteQueue()
     m_writeInFlight = false;
     m_inflightChunks = 0;
     m_consecutiveWriteErrors = 0;
+    // 数据写入的在途记录一并作废（控制指令的保留：它们不属于这条队列）
+    dropInflight(InflightFilter::DataOnly);
 }
 
 void DeviceHandler::onWriteTimerTimeout()
@@ -573,15 +718,30 @@ void DeviceHandler::onCharacteristicWritten(const QLowEnergyCharacteristic &c,
                                             const QByteArray &value)
 {
     Q_UNUSED(value);
-    if (!m_writeCharacteristic.isValid() || c.uuid() != m_writeCharacteristic.uuid())
+    QLowEnergyService *service = qobject_cast<QLowEnergyService*>(sender());
+
+    // 控制指令的完成回调：只销账，不参与下行队列。
+    if (service && service == m_controlService && m_controlCharacteristic.isValid()
+            && c.uuid() == m_controlCharacteristic.uuid()) {
+        takeInflight(service, InflightFilter::ControlOnly);
         return;
+    }
+
+    if (service != m_writeService || !m_writeCharacteristic.isValid()
+            || c.uuid() != m_writeCharacteristic.uuid()) {
+        return;
+    }
+
+    // 销掉这条数据写入的在途记录，顺便得知它是普通下行还是流式分片。
+    // None 表示记录已被清掉（切换目标、停滞复位），按旧逻辑保守处理。
+    const WriteKind kind = takeInflight(service, InflightFilter::DataOnly);
 
     m_consecutiveWriteErrors = 0;          // 有一包成功写出，链路是通的
 
     if (m_writeMode == QLowEnergyService::WriteWithoutResponse) {
         // Qt Android 对无响应写入同样会发完成回调（Android 栈本地处理完这一包），
-        // 用它做在途计数的闭环。oneShot 分片不计入在途，所以这里只在计数>0 时递减。
-        if (m_inflightChunks > 0)
+        // 用它做在途计数的闭环。oneShot 分片不计入在途，所以只为流式分片递减。
+        if (kind != WriteKind::OneShot && m_inflightChunks > 0)
             --m_inflightChunks;
         m_lastAckTimer.restart();
         // 在途数腾出空位，马上补发，不必干等下一拍定时器
@@ -597,43 +757,94 @@ void DeviceHandler::onCharacteristicWritten(const QLowEnergyCharacteristic &c,
 
 void DeviceHandler::onServiceError(QLowEnergyService::ServiceError error)
 {
-    // 仅在正在向下行目标写入时报错（其他读/写/描述符操作不归本模块管）
-    if (m_writeService != qobject_cast<QLowEnergyService*>(sender()))
-        return;
-    if (m_writeQueue.isEmpty() && m_inflightChunks == 0)
+    QLowEnergyService *service = qobject_cast<QLowEnergyService*>(sender());
+    if (!service || error == QLowEnergyService::NoError)
         return;
 
-    const bool wasStreaming = m_streamQueuedBytes > 0 || m_streamOverflowed
+    // 描述符写入失败 = 某条通知的开关没写成（enableCharacteristicNotification /
+    // setControlChannel 只能保证「发出去了」）。它与下行队列无关，但必须让人看见：
+    // 否则界面说「通知已开启」，实际一个字节也收不到。
+    if (error == QLowEnergyService::DescriptorWriteError) {
+        emit statusChanged("通知开关写入失败，该特征可能收不到数据: "
+                           + service->serviceUuid().toString());
+        return;
+    }
+    // 读类错误不是本模块发起的写入造成的
+    if (error == QLowEnergyService::CharacteristicReadError
+            || error == QLowEnergyService::DescriptorReadError) {
+        return;
+    }
+
+    // 归属：出错的是这个服务上最早那条尚未回调的写入（见 noteInflight 的说明）。
+    const WriteKind kind = takeInflight(service, InflightFilter::Any);
+
+    if (kind == WriteKind::Control) {
+        // 控制指令失败只影响控制通道，绝不动音频队列。
+        qWarning().nospace() << "[BLE-CTRL-ERR] error=" << int(error);
+        emit controlWriteFailed("错误码 " + QString::number(int(error)));
+        return;
+    }
+
+    if (service != m_writeService)
+        return;
+
+    // 没有任何下行数据在排队或在途，这个错误就不是下行写入造成的。
+    // 注意必须把「已发出、等回调」的那一包算进来：队列为空不代表没有在途的包
+    // ——最后一包（或唯一一包）出错时队列恰好是空的。
+    const bool dataInFlight = kind != WriteKind::None || m_writeInFlight
                               || m_inflightChunks > 0;
+    if (m_writeQueue.isEmpty() && !dataInFlight)
+        return;
+
+    const bool streamActive = m_streamQueuedBytes > 0 || m_streamOverflowed
+                              || m_inflightChunks > 0 || m_streamWasActive;
+    // 出错的这一包是不是流式分片。记录缺失（None）时按「当前有没有流在跑」推断。
+    const bool failedStream = kind == WriteKind::Stream
+                              || (kind == WriteKind::None && streamActive);
+
+    // 这一包不会再有完成回调，把它占着的发送名额还回去。有响应模式下若不清
+    // m_writeInFlight，startSendingIfIdle() 会永远认为「上一包还没确认」，
+    // 下行从此卡死，直到重选写入目标。
+    if (m_writeMode == QLowEnergyService::WriteWithResponse) {
+        m_writeInFlight = false;
+    } else if (failedStream && m_inflightChunks > 0) {
+        --m_inflightChunks;
+    }
 
     // 流式音频的单次写入错误很常见且可恢复：Qt 的 3 秒 IO 超时、Android 栈偶发
     // 忙都会上报 CharacteristicWriteError，但后面的包照样能写出去。以前这里一次
     // 就清空队列并中止回传，表现为「跑一阵子就自己掉回本机播放，而且每次时长不定」。
     // 现在只在**连续**多次失败（没有任何一包成功写出）时才判定链路真的坏了。
     // 成功回调会在 onCharacteristicWritten 里把计数清零。
-    if (wasStreaming) {
+    if (failedStream) {
         ++m_consecutiveWriteErrors;
-        // 这一包出错也会收到一次完成/错误回调，不会再递减在途数，这里补上
-        if (m_inflightChunks > 0)
-            --m_inflightChunks;
         qWarning().nospace() << "[BLE-WRITE-ERR] error=" << int(error)
                              << " 连续=" << m_consecutiveWriteErrors << "/"
                              << kMaxConsecutiveWriteErrors
                              << " queued=" << m_streamQueuedBytes << "B inflight="
                              << m_inflightChunks;
-        if (m_consecutiveWriteErrors < kMaxConsecutiveWriteErrors)
-            return;                        // 容忍：丢这一包，继续发后面的
+        if (m_consecutiveWriteErrors < kMaxConsecutiveWriteErrors) {
+            // 容忍：丢这一包，继续发后面的。无响应模式有定时器按节拍推进；
+            // 有响应模式全靠完成回调推进，而这一包不会有回调了，必须在这里续发
+            // （队列若已空，sendNextWriteChunk 会走收尾并发 streamDrained）。
+            if (m_writeMode == QLowEnergyService::WriteWithResponse)
+                sendNextWriteChunk();
+            return;
+        }
     }
 
+    // 走到这里：普通下行（一条 AI 回复）有一包写失败，或流式连续失败到上限。
+    // 一条回复缺了一段就没有意义，整条作废并明确报错——同时 m_oneShotPending
+    // 随 clearWriteQueue() 复位，下一条回复不会再被「正在发送上一条」挡住。
     qWarning().nospace() << "[BLE-ABORT] 原因=服务写入错误 error=" << int(error)
                          << " 连续=" << m_consecutiveWriteErrors
-                         << " queued=" << m_streamQueuedBytes << "B streaming=" << wasStreaming
+                         << " queued=" << m_streamQueuedBytes << "B streaming=" << streamActive
                          << " mode=" << (m_writeMode == QLowEnergyService::WriteWithResponse
                                          ? "WithResponse" : "NoResponse");
 
     clearWriteQueue();
     emit writeError("特征写入失败，错误码: " + QString::number(int(error)));
-    if (wasStreaming)
+    if (streamActive)
         emit streamAborted("写入失败，错误码: " + QString::number(int(error)));
 }
 
@@ -675,7 +886,9 @@ void DeviceHandler::onServiceDiscovered(const QBluetoothUuid &newService)
     }
 
     m_services.append(service);
-    m_pendingServiceDetails++;
+    m_detailsPending.insert(service);
+    if (!m_detailsTimer->isActive())
+        m_detailsTimer->start();
 
     connect(service, &QLowEnergyService::stateChanged,
             this, &DeviceHandler::onServiceStateChanged);
@@ -692,12 +905,26 @@ void DeviceHandler::onServiceDiscovered(const QBluetoothUuid &newService)
 
 void DeviceHandler::onServiceDiscoveryFinished()
 {
+    if (qobject_cast<QLowEnergyController*>(sender()) != m_controller)
+        return;   // 旧控制器迟到的事件（同 onServiceDiscovered）
+
     m_servicesDiscovered = true;
     emit statusChanged("Service discovery finished. Discovering details...");
-    // 如果没有发现任何服务，直接通知UI
-    if (m_services.isEmpty()) {
-        emit serviceDetailsDiscoveryFinished();
+    // 没有任何服务，或所有服务的详情都赶在本信号之前出了结果：这里就是收尾点。
+    if (m_detailsPending.isEmpty())
+        finishDetailsDiscovery(false);
+}
+
+void DeviceHandler::finishDetailsDiscovery(bool timedOut)
+{
+    m_detailsTimer->stop();
+    if (timedOut) {
+        emit statusChanged(QString("服务详情发现超时：仍有 %1 个服务没有结果，先按已发现的部分继续")
+                           .arg(m_detailsPending.size()));
+    } else {
+        emit statusChanged("All service details discovered.");
     }
+    emit serviceDetailsDiscoveryFinished();
 }
 
 // ---------- 服务详情（特征）发现 ----------
@@ -718,13 +945,21 @@ void DeviceHandler::onServiceStateChanged(QLowEnergyService::ServiceState newSta
         }
     }
 
-    // 检查是否所有服务的详情都已发现
+    // 这个服务的详情发现有了结果。RemoteServiceDiscovered 是成功；退回
+    // RemoteService 是**启动失败**（Qt 6.2 起它的含义是「详情尚未发现」）——
+    // 后者同样算「有结果」以免卡住收尾，但特征是空的，必须让使用方知道：
+    // 说一声，并靠 characteristicPresent() 逐个核实（见 MainWindow::configureBoard）。
+    if (newState == QLowEnergyService::RemoteService) {
+        emit statusChanged("服务详情发现失败，其特征不可用: "
+                           + service->serviceUuid().toString());
+    }
     if (newState == QLowEnergyService::RemoteServiceDiscovered ||
         newState == QLowEnergyService::RemoteService) {
-        m_pendingServiceDetails--;
-        if (m_pendingServiceDetails <= 0 && m_servicesDiscovered) {
-            emit serviceDetailsDiscoveryFinished();
-            emit statusChanged("All service details discovered.");
+        // remove() 对同一个服务只会成功一次，重复的状态通知不会重复收尾。
+        // 超时之后才姗姗来迟的服务也走这里：再通知一次，让使用方有机会补配置。
+        if (m_detailsPending.remove(service) && m_detailsPending.isEmpty()
+                && m_servicesDiscovered) {
+            finishDetailsDiscovery(false);
         }
     }
 }
@@ -738,6 +973,14 @@ void DeviceHandler::onCharacteristicChanged(const QLowEnergyCharacteristic &c, c
     // 数据混入转写缓冲。此判据与 enableCharacteristicNotification 关闭上一条通知时
     // 的比对保持一致（服务 + 特征）。
     QLowEnergyService *service = qobject_cast<QLowEnergyService*>(sender());
+
+    // 控制通道的回执优先分流：它是文本，绝不能混进上行音频。
+    if (m_controlService && service == m_controlService
+            && m_controlCharacteristic.uuid() == c.uuid()) {
+        emit controlReply(value);
+        return;
+    }
+
     if (m_activeService && service == m_activeService
             && m_activeCharacteristic.uuid() == c.uuid()) {
         emit dataReceived(value);

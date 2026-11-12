@@ -1,5 +1,6 @@
 #include "assetextractor.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -14,6 +15,20 @@ constexpr qint64 kChunkBytes = 1024 * 1024;
 
 // 提取清单：所有目标文件都 rename 成功之后才写它。
 constexpr char kManifestName[] = ".extract-manifest";
+
+// 清单首行：格式标记 + 制表符 + 提取时的应用版本。
+//
+// 旧格式（v1）的清单没有这一行，第一行直接就是「文件名\t长度」。读到它时
+// 首行对不上标记，isExtracted() 返回 false，于是重新提取并写出新格式——
+// 只多提取这一次，不会被当成损坏而反复重试。
+constexpr char kManifestHeader[] = "#extract-manifest-v2";
+
+// 当前应用版本。Android 上 Qt 默认取 APK 的 versionName。
+// 它覆盖「新旧模型长度恰好相同」的情况：升级必然换版本号，换了就重提。
+QString currentAppVersion()
+{
+    return QCoreApplication::applicationVersion();
+}
 
 QString pathIn(const QString &dir, const QString &name)
 {
@@ -35,6 +50,7 @@ bool writeManifest(const QString &targetDir, const QStringList &fileNames,
 
     QTextStream out(&file);
     out.setEncoding(QStringConverter::Utf8);
+    out << kManifestHeader << '\t' << currentAppVersion() << '\n';
     for (int i = 0; i < fileNames.size(); ++i)
         out << fileNames.at(i) << '\t' << sizes.at(i) << '\n';
     out.flush();
@@ -48,7 +64,8 @@ bool writeManifest(const QString &targetDir, const QStringList &fileNames,
 
 namespace AssetExtractor {
 
-bool isExtracted(const QString &targetDir, const QStringList &fileNames)
+bool isExtracted(const QString &assetDir, const QString &targetDir,
+                 const QStringList &fileNames)
 {
     if (fileNames.isEmpty())
         return false;
@@ -59,6 +76,15 @@ bool isExtracted(const QString &targetDir, const QStringList &fileNames)
 
     QHash<QString, qint64> recorded;
     QTextStream in(&manifest);
+    in.setEncoding(QStringConverter::Utf8);
+
+    // 首行必须是「当前格式 + 当前应用版本」。旧格式清单、别的版本留下的清单
+    // 都在这里被判为「不是这份 APK 的副本」。
+    const QString expectedHeader = QLatin1String(kManifestHeader)
+                                   + QLatin1Char('\t') + currentAppVersion();
+    if (in.atEnd() || in.readLine() != expectedHeader)
+        return false;
+
     while (!in.atEnd()) {
         const QString line = in.readLine();
         if (line.isEmpty())
@@ -93,6 +119,13 @@ bool isExtracted(const QString &targetDir, const QStringList &fileNames)
 
         // 按字节长度校验，而不是「存在即有效」。
         if (info.size() != it.value())
+            return false;
+
+        // 再和 APK 里的源资产比：清单记的是「上次复制出来的长度」，只拿落盘文件
+        // 去比是自洽的，永远相等。源资产换了（长度不同）必须能看出来。
+        // assets:/ 上 QFileInfo::size() 可用；量不到（源不存在）同样算对不上。
+        const QFileInfo source(pathIn(assetDir, name));
+        if (!source.exists() || source.size() != it.value())
             return false;
     }
 
@@ -193,7 +226,7 @@ bool extractFiles(const QString &assetDir, const QString &targetDir,
 bool ensureExtracted(const QString &assetDir, const QString &targetDir,
                      const QStringList &fileNames, QString *errorOut)
 {
-    if (isExtracted(targetDir, fileNames))
+    if (isExtracted(assetDir, targetDir, fileNames))
         return true;
 
     return extractFiles(assetDir, targetDir, fileNames, errorOut);

@@ -36,9 +36,11 @@ class MainWindow : public QObject
     Q_PROPERTY(bool speaking READ isSpeaking NOTIFY speakingChanged)
     // 是否把 TTS 音频通过 BLE 回传眼镜（开启时本机扬声器静音）
     Q_PROPERTY(bool bleAudioOut READ isBleAudioOut NOTIFY bleAudioOutChanged)
-    // 是否识别到开发板（ESP32-C3 蓝牙音频收发器）。识别后自动配置控制/音频/播放
-    // 特征，并对回传音频做 8k→16k 重采样、在播放前后发送 play/stop 指令。
+    // 是否识别到开发板（ESP32-C3 蓝牙音频收发器）且三个特征全部配置成功。
+    // 为真时回传走固定的播放特征，并在播放前后经控制通道发送 rate/play/stop 指令。
     Q_PROPERTY(bool boardDetected READ isBoardDetected NOTIFY boardDetectedChanged)
+    // 语音识别模型是否已加载完成。模型在后台线程加载，未就绪时不接收上行音频。
+    Q_PROPERTY(bool whisperReady READ isWhisperReady NOTIFY whisperReadyChanged)
 
 public:
     explicit MainWindow(QObject *parent = nullptr);
@@ -64,6 +66,7 @@ public:
     bool isSpeaking() const { return m_speaking; }
     bool isBleAudioOut() const { return m_bleAudioOut; }
     bool isBoardDetected() const { return m_board; }
+    bool isWhisperReady() const { return m_whisperReady; }
 
     Q_INVOKABLE void startScan();
     Q_INVOKABLE void connectToDevice(int index);
@@ -107,6 +110,7 @@ signals:
     void speakingChanged();
     void bleAudioOutChanged();                                        // 音频回传开关已变更
     void boardDetectedChanged();                                      // 开发板识别状态已变更
+    void whisperReadyChanged();                                       // 识别模型就绪状态已变更
     // 内部用：把后台线程的提取/初始化结果投递回 GUI 线程（见 prepareTtsModel）
     void ttsPrepared(int sampleRate);
     void ttsPrepareFailed(const QString &error);
@@ -129,19 +133,32 @@ private slots:
     void onAudioChunk(const QByteArray &pcm, int sampleRate);
     void onSentenceFinished();
     void onSpeechFailed(const QString &reason);
+    // 开发板控制特征的文本回执（OK:playing / ERROR:... 等）
+    void onBoardControlReply(const QByteArray &value);
 
 private:
     void requestAndroidPermissions();
     void clearServices();
     void clearWriteTarget();          // 清空 BLE 写入目标（断开/切换设备时调用）
-    // 识别到开发板后自动配置三个特征：控制指令目标、麦克风音频通知、扬声器播放目标
+    // 断开/切换设备时丢掉上行音频的全部残留（识别缓冲、待转写队列、冲刷定时器）
+    void resetAudioInput();
+    // 识别到开发板后自动配置三个特征：控制通道、麦克风音频通知、扬声器播放目标。
+    // 逐项核实，全部成功才算识别到开发板。
     void configureBoard();
-    // 开发板播放会话的开始/结束：向控制特征发 play/stop（非开发板时为无操作）。
-    // boardPlayIfNeeded() 返回 false 表示 play 指令发送失败（回传已随之关闭），
-    // 调用方不应再往播放特征喂音频。
-    bool boardPlayIfNeeded();
+    // 开发板播放会话。play 是**要确认的**：requestBoardPlay() 发出 stop/rate/play
+    // 后进入 Requested，此间回传音频先扣在 m_boardHeldPcm 里、合成排空暂停；
+    // 收到固件的 OK:playing 才转 Playing 并放行（confirmBoardPlay），
+    // 被拒绝、写入失败或超时则关闭回传退回本机播放（failBoardPlay）。
+    void requestBoardPlay();
+    void confirmBoardPlay();
+    void failBoardPlay(const QString &reason);
     void boardStopIfNeeded();
-    // 蓝牙回传音频应使用的采样率：开发板固定 16 kHz，否则用 TTS 模型采样率
+    // 把一块已是回传采样率的 PCM 交给蓝牙流式队列，并按高水位进入背压
+    void enqueueBleAudio(const QByteArray &pcm);
+    // 合成排空是否该暂停 = 蓝牙背压 或 正在等开发板确认 play。唯一的写入口。
+    void updateDrainGate();
+    // 蓝牙回传音频应使用的采样率：TTS 模型的原生采样率（开发板由固件插值到 16 kHz），
+    // 模型采样率固件插不了时才退回 16 kHz 并在手机侧重采样
     int bleStreamSampleRate() const;
     // 在后台线程提取 TTS 模型并初始化合成器（绝不占用构造函数）
     void prepareTtsModel();
@@ -169,7 +186,10 @@ private:
     SpeechSynthesizer *m_synthesizer = nullptr;
     QList<QBluetoothDeviceInfo> m_discoveredDevices;
     QVariantList m_services;            // 服务/特征树数据（暴露给 QML）
-    QByteArray m_audioBuffer;
+    bool m_whisperReady = false;
+    bool m_whisperNotReadyWarned = false;   // 「模型未就绪」只提示一次，不逐包刷屏
+    // 尾音冲刷：一段时间没有新的上行数据，就把不足 3 秒的尾巴也送去识别
+    QTimer *m_tailFlushTimer = nullptr;
     bool m_isScanning = false;
     bool m_isConnected = false;
     QString m_deviceName;
@@ -178,10 +198,15 @@ private:
     QString m_writeCharUuid;     // BLE 写入目标特征 UUID
 
     // ===== 开发板（ESP32-C3 蓝牙音频收发器）适配状态 =====
-    bool m_board = false;                 // 已识别到开发板服务
-    bool m_boardPlaying = false;          // 已向开发板发送 play、扬声器处于播放态
-    QString m_boardControlServiceUuid;    // 开发板控制特征所在服务 UUID
-    QString m_boardControlCharUuid;       // 开发板控制特征 UUID
+    bool m_board = false;                 // 已识别到开发板且三个特征全部就绪
+    enum class BoardPlay {
+        Idle,        // 没有播放会话（固件应处于 stopped）
+        Requested,   // 已发 play，等固件回 OK:playing
+        Playing,     // 固件已确认进入播放态，可以喂音频
+    };
+    BoardPlay m_boardPlay = BoardPlay::Idle;
+    QByteArray m_boardHeldPcm;            // 等确认期间扣住的回传音频（确认后整体放行）
+    QTimer *m_boardPlayTimer = nullptr;   // play 确认超时
 
     // ===== 朗读（TTS）状态 =====
     QAudioSink *m_audioSink = nullptr;

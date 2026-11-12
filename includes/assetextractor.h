@@ -23,6 +23,10 @@
 //   4. 「是否已提取」靠**清单 + 逐文件字节长度**判定，不是「文件存在即有效」；
 //      清单在所有文件都 rename 成功之后才写，所以它本身就是「这次提取完整」
 //      的唯一凭据
+//   5. 「已提取」的含义是**落盘副本确实来自当前这份 APK**，而不只是「落盘文件
+//      没被动过」：清单记下提取时的应用版本，校验时还要重新量一遍源资产的长度。
+//      换了版本或换了模型文件都会重新提取——否则装上带新模型的 APK 之后，
+//      旧副本会一直被当成有效的继续用，而且没有任何提示。
 //
 // 注意：Qt 的 `assets:/` 引擎只能随机读、**不能列目录**（QDir 迭代在 assets:/
 // 上不工作），所以文件清单必须由调用方显式给出。
@@ -33,8 +37,11 @@ namespace AssetExtractor {
 bool extractFiles(const QString &assetDir, const QString &targetDir,
                   const QStringList &fileNames, QString *errorOut = nullptr);
 
-// 逐文件按字节长度校验 targetDir 是否已是 assetDir 的完整副本。
-bool isExtracted(const QString &targetDir, const QStringList &fileNames);
+// targetDir 是否已是 assetDir（当前这份 APK 里的资产）的完整副本：
+// 清单格式与应用版本一致、文件集合一致，且每个文件的落盘长度、清单记录、
+// 源资产长度三者相等。任何一项对不上都返回 false（随后会整体重新提取）。
+bool isExtracted(const QString &assetDir, const QString &targetDir,
+                 const QStringList &fileNames);
 
 // 已完整则立刻返回 true（不拷贝任何字节）；否则完整重新提取。
 bool ensureExtracted(const QString &assetDir, const QString &targetDir,

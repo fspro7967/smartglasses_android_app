@@ -128,6 +128,17 @@ constexpr int kAudioPumpIntervalMs = 20;
 // 会变成一个静默的死局，界面永远停在「正在朗读」，比直接报错更难排查。
 constexpr int kStalledTicksBeforeGivingUp = 150;
 
+// 尾音冲刷的静默时长：这么久没有新的上行数据，就认为这句话说完了，把识别缓冲里
+// 不足 3 秒的尾巴也送去转写。上行音频的两个成段条件——「凑满 3 秒」在
+// WhisperManager::feedAudioData()，「多久没数据」在这里——缺一不可：只有前者时，
+// 最后不足 3 秒的话（短指令往往就是全部内容）永远不会被识别。
+// 设备正常上行时相邻两包只隔几毫秒，600 ms 远大于任何正常的包间隔。
+constexpr int kTailFlushMs = 600;
+
+// 等开发板确认 play 的最长时间。回执正常在一两个连接间隔（几十毫秒）内到达；
+// 取 2 秒是为了先于 Qt 自己的 3 秒 IO 超时给出结论。
+constexpr int kBoardPlayConfirmTimeoutMs = 2000;
+
 } // namespace
 
 MainWindow::MainWindow(QObject *parent)
@@ -176,12 +187,25 @@ MainWindow::MainWindow(QObject *parent)
         maybeFinishSpeaking();
     });
 
+    // 开发板控制通道：回执用来确认 play，写入失败单独上报（不牵连音频队列）
+    connect(m_deviceHandler, &DeviceHandler::controlReply,
+            this, &MainWindow::onBoardControlReply);
+    connect(m_deviceHandler, &DeviceHandler::controlWriteFailed, this,
+            [this](const QString &reason) {
+        if (m_boardPlay == BoardPlay::Requested)
+            failBoardPlay("控制指令写入失败，" + reason);
+        else
+            emit statusMessage("开发板控制指令写入失败（" + reason
+                               + "），扬声器状态可能与界面不一致");
+    });
+
     connect(m_deviceHandler, &DeviceHandler::connected, this, [this]() {
         m_isConnected = true;
         m_deviceName = m_pendingDeviceName;
         emit connectionChanged();
         clearServices();
         clearWriteTarget();   // 新设备连接后写入目标失效，需重新选择
+        resetAudioInput();
         emit statusMessage("已连接设备: " + m_deviceName);
     });
     connect(m_deviceHandler, &DeviceHandler::disconnected, this, [this]() {
@@ -190,6 +214,7 @@ MainWindow::MainWindow(QObject *parent)
         emit connectionChanged();
         clearServices();
         clearWriteTarget();
+        resetAudioInput();    // 上一段会话的残留音频不能拼进下一段
         emit statusMessage("连接已断开");
     });
     connect(m_deviceHandler, &DeviceHandler::scanFinished, this, [this]() {
@@ -207,17 +232,49 @@ MainWindow::MainWindow(QObject *parent)
 
     // 初始化 Whisper：模型直接从 assets 读进内存，不再解压到磁盘。
     // 因此 AppDataLocation 下不会再出现 whisper 模型文件。
+    // 读入 + 解析 59.7 MB 的模型要好几秒，放在后台线程做：构造函数里只接线，
+    // 首屏不必等它（与下面 TTS 的做法一致）。
     m_whisperManager = new WhisperManager(this);
     connect(m_whisperManager, &WhisperManager::transcriptionReady,
             this, &MainWindow::onTranscriptionResult, Qt::QueuedConnection);
     connect(m_whisperManager, &WhisperManager::errorOccurred,
             this, &MainWindow::onWhisperError, Qt::QueuedConnection);
-
-    if (!m_whisperManager->init(QStringLiteral("assets:/models/model.bin"))) {
-        emit statusMessage("Whisper 模型加载失败，请检查文件！");
-    } else {
+    connect(m_whisperManager, &WhisperManager::ready, this, [this]() {
+        m_whisperReady = true;
+        m_whisperNotReadyWarned = false;
+        emit whisperReadyChanged();
         emit statusMessage("Whisper 模型加载成功！");
-    }
+    }, Qt::QueuedConnection);
+    connect(m_whisperManager, &WhisperManager::initFailed, this, [this](const QString &error) {
+        emit statusMessage("Whisper 模型加载失败: " + error);
+    }, Qt::QueuedConnection);
+    // 成段进度单独一个信号，不再混在错误通道里
+    connect(m_whisperManager, &WhisperManager::segmentQueued, this,
+            [this](int sampleCount, int pendingSegments) {
+        const double seconds = double(sampleCount) / WhisperManager::kSampleRate;
+        emit statusMessage(pendingSegments > 1
+            ? QString("已将 %1 秒音频送入 Whisper（排队 %2 段）")
+                  .arg(seconds, 0, 'f', 1).arg(pendingSegments)
+            : QString("已将 %1 秒音频送入 Whisper").arg(seconds, 0, 'f', 1));
+    });
+
+    m_tailFlushTimer = new QTimer(this);
+    m_tailFlushTimer->setSingleShot(true);
+    m_tailFlushTimer->setInterval(kTailFlushMs);
+    connect(m_tailFlushTimer, &QTimer::timeout, this, [this]() {
+        if (m_whisperManager)
+            m_whisperManager->flush();
+    });
+
+    m_boardPlayTimer = new QTimer(this);
+    m_boardPlayTimer->setSingleShot(true);
+    m_boardPlayTimer->setInterval(kBoardPlayConfirmTimeoutMs);
+    connect(m_boardPlayTimer, &QTimer::timeout, this, [this]() {
+        if (m_boardPlay == BoardPlay::Requested)
+            failBoardPlay("等待 play 确认超时");
+    });
+
+    m_whisperManager->initAsync(QStringLiteral("assets:/models/model.bin"));
 
     // 初始化语音合成。模型提取与 ONNX 解析都很慢，全部放到后台线程，
     // 构造函数里只接线（规格步骤 2 的硬要求：不占用构造函数）。
@@ -275,6 +332,7 @@ void MainWindow::connectToDevice(int index)
         const QBluetoothDeviceInfo &info = m_discoveredDevices.at(index);
         m_pendingDeviceName = info.name().isEmpty() ? info.address().toString() : info.name();
         clearWriteTarget();   // 切换到新设备，旧的写入目标随之失效
+        resetAudioInput();    // 旧设备的残留上行音频随之作废
         m_deviceHandler->connectToDevice(info);
     }
 }
@@ -288,15 +346,25 @@ void MainWindow::disconnectDevice()
     emit connectionChanged();
     clearServices();
     clearWriteTarget();
+    resetAudioInput();
     emit statusMessage("正在断开连接...");
+}
+
+void MainWindow::resetAudioInput()
+{
+    if (m_tailFlushTimer)
+        m_tailFlushTimer->stop();
+    if (m_whisperManager)
+        m_whisperManager->reset();
+    m_whisperNotReadyWarned = false;   // 每次连接各提示一次
 }
 
 // 设置 AI 回复的 BLE 写入目标（转发给 DeviceHandler，仅在其接受后更新 UI 状态）
 void MainWindow::setWriteTarget(const QString &serviceUuid, const QString &charUuid)
 {
     // 开发板的控制特征只收发文本指令，不接受下行音频；误选它会把音频字节喂给
-    // 指令解析器。开发板的下行目标固定是播放特征，控制指令由 boardPlayIfNeeded()
-    // 单独发送（见 configureBoard）。
+    // 指令解析器。开发板的下行目标固定是播放特征，控制指令经独立的控制通道
+    // 发送（见 configureBoard / requestBoardPlay）。
     // UI 传来的是带花括号的 QBluetoothUuid::toString() 格式，按 UUID 而非字符串比较。
     if (m_board && QBluetoothUuid(charUuid) == QBluetoothUuid(QLatin1String(BoardProtocol::kControlCharUuid))) {
         emit statusMessage("开发板控制特征仅用于指令，音频回传请选择播放特征");
@@ -338,6 +406,7 @@ void MainWindow::setBleAudioOut(bool enabled)
     if (!enabled) {
         m_deviceHandler->clearStreamQueue();   // 关闭即静音：丢掉还没发出去的音频
         boardStopIfNeeded();                   // 让开发板也停下，别把已入队的播完
+        updateDrainGate();                     // 不再等蓝牙：合成排空恢复，本机接着念
     }
 
     // 字节率跟着实际回传采样率走：开发板 16 kHz 时码率翻倍。它决定无响应写入的
@@ -369,32 +438,43 @@ void MainWindow::applyAudioVolume()
 
 void MainWindow::setBleBackpressured(bool backpressured)
 {
-    if (m_bleBackpressured == backpressured)
-        return;
     m_bleBackpressured = backpressured;
     // 关键：背压必须作用到合成源头。onAudioChunk() 是「一收到 audioChunk 就整块入
     // 蓝牙队列」，只暂停本机 sink 只是让它不再消耗 m_pendingPcm，挡不住当前这句继续
     // 被排空进蓝牙队列——那正是队列涨到积压上限、触发 streamAborted 的成因。
+    updateDrainGate();
+}
+
+// 合成排空的闸门。两个理由任一成立就暂停：蓝牙队列积压（背压），或开发板还没
+// 确认 play（此时发过去的音频会被固件丢弃）。两处都只改各自的标志再调这里，
+// 不各自去拨合成器的开关——否则一方恢复时会把另一方的暂停一并解除。
+// （SpeechSynthesizer::stop() 会自行解除暂停；setDrainPaused 对相同值是空操作。）
+void MainWindow::updateDrainGate()
+{
     if (m_synthesizer)
-        m_synthesizer->setDrainPaused(backpressured);
+        m_synthesizer->setDrainPaused(m_bleBackpressured
+                                      || m_boardPlay == BoardPlay::Requested);
 }
 
 void MainWindow::enableNotification(const QString &serviceUuid, const QString &charUuid)
 {
-    m_deviceHandler->enableCharacteristicNotification(serviceUuid, charUuid, true);
-    emit statusMessage("已启用通知: " + charUuid);
+    if (m_deviceHandler->enableCharacteristicNotification(serviceUuid, charUuid, true))
+        emit statusMessage("已启用通知: " + charUuid);
+    else
+        emit statusMessage("启用通知失败（特征不存在或不支持通知）: " + charUuid);
 }
 
 void MainWindow::processAudioFile(const QString &filePath)
 {
     if (filePath.isEmpty()) return;
     emit statusMessage("选择音频文件: " + filePath);
-    if (m_whisperManager) {
-        m_whisperManager->processAudioFile(filePath);
-        emit statusMessage("已将音频文件送入模型识别");
-    } else {
-        emit statusMessage("模型未初始化");
+    if (!m_whisperManager || !m_whisperReady) {
+        emit statusMessage("语音识别模型尚未就绪，请稍后再试");
+        return;
     }
+    // 没受理时原因已经由 errorOccurred 报到状态栏，这里只在真的送进去之后才说成功
+    if (m_whisperManager->processAudioFile(filePath))
+        emit statusMessage("已将音频文件送入模型识别");
 }
 
 void MainWindow::sendMessageToServer(const QString &message)
@@ -478,9 +558,11 @@ void MainWindow::clearServices()
     // 服务列表清空意味着设备已断开或切换：开发板识别状态失效，重新发现后再配置
     const bool wasBoard = m_board;
     m_board = false;
-    m_boardPlaying = false;
-    m_boardControlServiceUuid.clear();
-    m_boardControlCharUuid.clear();
+    m_boardPlay = BoardPlay::Idle;
+    m_boardHeldPcm.clear();
+    if (m_boardPlayTimer)
+        m_boardPlayTimer->stop();
+    updateDrainGate();
     if (wasBoard)
         emit boardDetectedChanged();
     emit servicesChanged();
@@ -489,32 +571,60 @@ void MainWindow::clearServices()
 // 开发板识别与自动配置：发现服务详情后，如果存在开发板服务，就把三个特征各就各位。
 // 这样用户不必手工从特征树里挑——开发板的音频/控制特征 UUID 固定，手工选错
 // （例如把控制特征当输出）会让音频被当成未知指令。
+//
+// 本信号可能来两次：详情发现超时后先来一次（带着已发现的部分），迟到的服务
+// 补齐后再来一次。所以已经配置成功的就不重复配置。
 void MainWindow::onServiceDetailsDiscoveryFinished()
 {
-    if (m_deviceHandler->servicePresent(QLatin1String(BoardProtocol::kServiceUuid)))
+    if (!m_board && m_deviceHandler->servicePresent(QLatin1String(BoardProtocol::kServiceUuid)))
         configureBoard();
 }
 
 void MainWindow::configureBoard()
 {
-    const QString serviceUuid = QLatin1String(BoardProtocol::kServiceUuid);
+    const QString serviceUuid  = QLatin1String(BoardProtocol::kServiceUuid);
+    const QString controlUuid  = QLatin1String(BoardProtocol::kControlCharUuid);
+    const QString audioUuid    = QLatin1String(BoardProtocol::kAudioCharUuid);
+    const QString playbackUuid = QLatin1String(BoardProtocol::kPlaybackCharUuid);
+
+    // 「识别成功」必须是**核实过**的，不是假设的。服务对象在不代表特征可用：
+    // 详情发现启动失败时服务仍会被计入「已有结果」，但它的特征全是无效的。
+    // 以前这里无条件宣布「麦克风通知已开启」，实际可能一个字节也收不到，
+    // 而唯一的线索是 logcat 里的一条警告。现在逐项检查，哪一步不成就说哪一步。
+    QString failedStep;
+    if (!m_deviceHandler->characteristicPresent(serviceUuid, controlUuid)) {
+        failedStep = QStringLiteral("未发现控制特征");
+    } else if (!m_deviceHandler->characteristicPresent(serviceUuid, audioUuid)) {
+        failedStep = QStringLiteral("未发现麦克风音频特征");
+    } else if (!m_deviceHandler->characteristicPresent(serviceUuid, playbackUuid)) {
+        failedStep = QStringLiteral("未发现扬声器播放特征");
+    } else if (!m_deviceHandler->setControlChannel(serviceUuid, controlUuid)) {
+        // 控制通道：写指令 + 收回执（回执用来确认 play，见 requestBoardPlay）
+        failedStep = QStringLiteral("控制特征不可写或无法开启回执通知");
+    } else if (!m_deviceHandler->enableCharacteristicNotification(serviceUuid, audioUuid, true)) {
+        // 麦克风 PCM（板→手机）：开启音频特征通知，后续照常进入 Whisper 缓冲
+        failedStep = QStringLiteral("麦克风音频特征无法开启通知");
+    } else {
+        // 扬声器 PCM（手机→板）：把播放特征设为下行写入目标（音频回传开关据此可用）。
+        // 复用 setWriteTarget() 这一唯一写入口更新 UI 状态；此刻 m_board 还是 false，
+        // 且播放特征本来也不触发控制特征守卫。接受与否看写入目标是否真的落在它上面。
+        setWriteTarget(serviceUuid, playbackUuid);
+        if (m_writeCharUuid != playbackUuid)
+            failedStep = QStringLiteral("扬声器播放特征不可写");
+    }
+
+    if (!failedStep.isEmpty()) {
+        // 保持 m_board = false：退化成普通 BLE 设备，用户仍可在特征树里手工选择。
+        m_deviceHandler->clearControlChannel();
+        emit statusMessage("发现开发板服务，但自动配置失败（" + failedStep
+                           + "），可在下方手动选择特征");
+        return;
+    }
 
     m_board = true;
-    m_boardControlServiceUuid = serviceUuid;
-    m_boardControlCharUuid = QLatin1String(BoardProtocol::kControlCharUuid);
-
-    // 麦克风 PCM（板→手机）：开启音频特征通知，后续照常进入 Whisper 缓冲。
-    m_deviceHandler->enableCharacteristicNotification(
-        serviceUuid, QLatin1String(BoardProtocol::kAudioCharUuid), true);
-
-    // 扬声器 PCM（手机→板）：把播放特征设为下行写入目标（音频回传开关据此可用）。
-    // 复用 setWriteTarget() 这一唯一写入口更新 UI 状态；播放特征不触发上面的
-    // 控制特征守卫，因此会被接受。
-    setWriteTarget(serviceUuid, QLatin1String(BoardProtocol::kPlaybackCharUuid));
-
     emit boardDetectedChanged();
     emit statusMessage(QStringLiteral(
-        "已识别开发板 ESP32_Audio：播放特征设为回传目标，麦克风通知已开启"));
+        "已识别开发板 ESP32_Audio：播放特征设为回传目标，麦克风通知与控制回执已开启"));
 }
 
 // 回传采样率：发 TTS 模型的原生采样率，不升采样。
@@ -523,6 +633,7 @@ void MainWindow::configureBoard()
 // 超过 Qt Android 串行写入的持续吞吐（实测约 24 KB/s），队列必然积压。现在手机
 // 发原生 8 kHz（16 KB/s），由固件按 rate:N 指令线性插值到 I2S 的 16 kHz。
 // 模型采样率若不是 16000 的整数约数（固件插不了），退回 16 kHz 并在手机侧重采样。
+// 决策记录见 docs/adr/0003-downlink-native-rate-board-upsamples.md。
 int MainWindow::bleStreamSampleRate() const
 {
     const int modelRate = m_synthesizer ? m_synthesizer->sampleRate() : 0;
@@ -535,47 +646,110 @@ int MainWindow::bleStreamSampleRate() const
     return rate;
 }
 
-// 一轮播放开始前给开发板发 "play"（固件收到前会丢弃播放特征上的音频）。
-// 在音频回传开启且当前不在播放态时发送，因此重播/新一轮回复都会重新触发。
-// 返回 false 表示 play 发不出去、回传已关闭，调用方必须停止喂音频。
-bool MainWindow::boardPlayIfNeeded()
+// 一轮播放开始前让开发板进入播放态（固件在 play 之前会丢弃播放特征上的音频）。
+//
+// 指令只是「发出去了」不等于「板子照做了」：写入可能失败，固件也可能拒绝。以前
+// 这里一发完就认定板子在播放，随后的音频全被固件丢掉，使用者听到的是一片安静，
+// 界面却显示回传已开启。所以现在要等固件的 OK:playing 回执才放行音频。
+//
+// 三条指令走同一条控制特征、同一个串行 IO 队列，到达顺序即发送顺序：
+//   stop    先把固件拉回已知状态。上一次的 stop 万一没送达，固件还停在播放态，
+//           此时它会拒绝 rate；多发一次 stop 就能自愈，代价只是一条短指令。
+//   rate:N  告知下行采样率（播放中固件会拒绝切换，所以必须在 play 之前）。
+//   play    进入播放态，回执 OK:playing。
+void MainWindow::requestBoardPlay()
 {
-    if (!m_board || !m_bleAudioOut)
-        return true;                 // 非开发板：无需 play，照常回传
-    if (m_boardPlaying)
-        return true;
-
-    // 先告知下行采样率（播放中固件会拒绝切换，所以必须在 play 之前）。
-    // 两条指令走同一条控制特征、同一个串行 IO 队列，到达顺序即发送顺序。
     const QByteArray rateCmd = QByteArray(BoardProtocol::kCmdRatePrefix)
                                + QByteArray::number(bleStreamSampleRate());
-    if (m_boardControlServiceUuid.isEmpty()
-        || !m_deviceHandler->writeControlValue(m_boardControlServiceUuid,
-                                               m_boardControlCharUuid, rateCmd)
-        || !m_deviceHandler->writeControlValue(m_boardControlServiceUuid,
-                                               m_boardControlCharUuid,
-                                               QByteArray(BoardProtocol::kCmdPlay))) {
-        // 控制特征不可用（服务/特征失效）：继续喂音频只会被板子丢弃，直接关掉回传，
-        // 并让本次音频不再入队。writeControlValue 已发过 writeError，状态栏有提示。
-        setBleAudioOut(false);
-        return false;
+    if (!m_deviceHandler->writeControlValue(QByteArray(BoardProtocol::kCmdStop))
+        || !m_deviceHandler->writeControlValue(rateCmd)
+        || !m_deviceHandler->writeControlValue(QByteArray(BoardProtocol::kCmdPlay))) {
+        failBoardPlay(QStringLiteral("控制通道不可用"));
+        return;
     }
-    m_boardPlaying = true;
-    return true;
+    m_boardPlay = BoardPlay::Requested;
+    m_boardPlayTimer->start();
+    // 等确认期间暂停合成排空：音频只会多扣住一两块（见 onAudioChunk），
+    // 不会在确认到来前把整段回复都堆进 m_boardHeldPcm。
+    updateDrainGate();
+}
+
+void MainWindow::confirmBoardPlay()
+{
+    m_boardPlayTimer->stop();
+    m_boardPlay = BoardPlay::Playing;
+
+    // 把等确认期间扣住的音频按原顺序放行
+    if (!m_boardHeldPcm.isEmpty()) {
+        const QByteArray held = std::exchange(m_boardHeldPcm, QByteArray());
+        enqueueBleAudio(held);
+    }
+    updateDrainGate();
+
+    // 本机 sink（节拍器）在等确认期间也是停着的，马上接着走
+    if (m_speaking || !m_pendingPcm.isEmpty()) {
+        writePendingAudio();
+        if (!m_pendingPcm.isEmpty() && m_audioPump && !m_audioPump->isActive())
+            m_audioPump->start();
+    }
+}
+
+// play 没能确认：关掉回传，这条回复改由本机扬声器念完（m_pendingPcm 里的音频
+// 一块没丢，恢复音量后从头播放）。setBleAudioOut(false) 里会发一条 stop——
+// 回执只是没收到，板子未必没进播放态，补一条 stop 让两边状态重新对齐。
+void MainWindow::failBoardPlay(const QString &reason)
+{
+    emit statusMessage("开发板未进入播放态（" + reason + "），语音改由本机播放");
+    m_boardHeldPcm.clear();
+    if (m_bleAudioOut) {
+        setBleAudioOut(false);
+    } else {
+        boardStopIfNeeded();
+        updateDrainGate();
+    }
+}
+
+void MainWindow::onBoardControlReply(const QByteArray &value)
+{
+    const QString text = QString::fromUtf8(value).trimmed();
+    qDebug() << "[BOARD] 控制回执:" << text;
+
+    const bool isError = text.startsWith(QLatin1String(BoardProtocol::kReplyErrorPrefix));
+    if (m_boardPlay == BoardPlay::Requested) {
+        if (text == QLatin1String(BoardProtocol::kReplyPlaying))
+            confirmBoardPlay();
+        else if (isError)
+            failBoardPlay("固件拒绝了指令 " + text);
+        // 其余回执（OK:stopped、OK:rate:N）是前两条指令的，继续等 OK:playing
+        return;
+    }
+    if (isError)
+        emit statusMessage("开发板指令被拒绝: " + text);
 }
 
 // 播放结束/中止时给开发板发 "stop"，否则扬声器会停在播放态等待后续音频。
+// 无论处在 Requested 还是 Playing 都要发：前者的 play 可能已经生效，只是回执没到。
 void MainWindow::boardStopIfNeeded()
 {
-    if (!m_boardPlaying)
+    if (m_boardPlay == BoardPlay::Idle)
         return;
-    m_boardPlaying = false;
+    m_boardPlay = BoardPlay::Idle;
+    m_boardHeldPcm.clear();
+    if (m_boardPlayTimer)
+        m_boardPlayTimer->stop();
     // 断开过程中服务对象已销毁，此时再写只会报错，直接复位状态即可。
-    if (!m_isConnected || m_boardControlServiceUuid.isEmpty())
+    if (!m_isConnected || !m_board)
         return;
-    m_deviceHandler->writeControlValue(m_boardControlServiceUuid,
-                                       m_boardControlCharUuid,
-                                       QByteArray(BoardProtocol::kCmdStop));
+    if (!m_deviceHandler->writeControlValue(QByteArray(BoardProtocol::kCmdStop)))
+        emit statusMessage("开发板 stop 指令未能发出，扬声器可能仍处于播放态");
+}
+
+void MainWindow::enqueueBleAudio(const QByteArray &pcm)
+{
+    m_deviceHandler->enqueueStreamData(pcm);
+    // 入队后越过高水位就立刻进入背压（暂停合成排空 + 本机 sink）
+    if (m_deviceHandler->streamQueuedBytes() > m_deviceHandler->streamHighWaterBytes())
+        setBleBackpressured(true);
 }
 
 void MainWindow::onServiceDiscovered(const QString &serviceUuid)
@@ -627,19 +801,23 @@ void MainWindow::onCharacteristicDiscovered(const QString &serviceUuid,
 
 void MainWindow::onDataReceived(const QByteArray &data)
 {
-    // 把收到的数据存入缓存区
-    m_audioBuffer.append(data);
+    if (!m_whisperManager)
+        return;
 
-    // 把缓存的数据传入模型，并清空缓存
-    constexpr int CHUNK_SIZE_BYTES = 3 * 16000 * sizeof(int16_t); // 约 3 秒的 16kHz/16bit 音频
-    if (m_audioBuffer.size() >= CHUNK_SIZE_BYTES && m_whisperManager) {
-        const int16_t *pcmData = reinterpret_cast<const int16_t*>(m_audioBuffer.constData());
-        const size_t sampleCount = static_cast<size_t>(m_audioBuffer.size() / sizeof(int16_t));
-        emit statusMessage(QString("已将 %1 字节音频送入 Whisper，样本数 %2")
-                           .arg(m_audioBuffer.size()).arg(sampleCount));
-        m_whisperManager->feedAudioData(pcmData, sampleCount);
-        m_audioBuffer.clear();
+    // 模型还在后台加载（或加载失败）：明确拒绝，而不是先收下再逐块报错。
+    // 上行音频每秒上百包，所以只提示一次。
+    if (!m_whisperReady) {
+        if (!m_whisperNotReadyWarned) {
+            m_whisperNotReadyWarned = true;
+            emit statusMessage("语音识别模型尚未就绪，暂不接收上行音频");
+        }
+        return;
     }
+
+    // 成段、排队、字节对齐都由 WhisperManager 负责（凑满 3 秒切一段）。
+    // 这里只补上第二个成段条件：一段时间没有新数据就冲刷尾巴（见 kTailFlushMs）。
+    m_whisperManager->feedAudioData(data);
+    m_tailFlushTimer->start();
 }
 
 void MainWindow::onBluetoothPermissionGranted()
@@ -842,20 +1020,32 @@ void MainWindow::onAudioChunk(const QByteArray &pcm, int sampleRate)
     if (pcm.isEmpty())
         return;
 
+    // 只在朗读期间收音频。audioChunk 是排队投递的，stopSpeaking() 之后可能还有
+    // 一块已经在路上；放它进来会在「已停止」的状态下又出一小段声音，开启回传时
+    // 还会重新给开发板发 play、却没有人再发 stop。
+    if (!m_speaking)
+        return;
+
     // 音频回传：收到一块就镜像一份到蓝牙（与现有 BLE 读取的音频格式对应，
-    // 都是原生 PCM）。采样率按目标设备来：开发板固件固定按 16 kHz 解码播放特征，
-    // 而模型是 8 kHz，必须先升采样，否则听到的是半速慢放；非开发板沿用模型
-    // 原始采样率（回传音频由眼镜播放，不该迁就手机扬声器的能力）。
-    // boardPlayIfNeeded() 负责在首个分片之前让板子进入播放态；返回 false 时回传
-    // 已被关闭，本块不再入队。
-    if (m_bleAudioOut && boardPlayIfNeeded()) {
+    // 都是原生 PCM）。采样率见 bleStreamSampleRate()：默认就是模型的原生采样率
+    // （回传音频由眼镜播放，不该迁就手机扬声器的能力），只有固件插值不了时才在
+    // 这里重采样。
+    if (m_bleAudioOut) {
         const int outRate = bleStreamSampleRate();
-        m_deviceHandler->enqueueStreamData(
-            sampleRate == outRate ? pcm
-                                  : resampleLinearLe(pcm, sampleRate, outRate));
-        // 入队后越过高水位就立刻进入背压（暂停合成排空 + 本机 sink）
-        if (m_deviceHandler->streamQueuedBytes() > m_deviceHandler->streamHighWaterBytes())
-            setBleBackpressured(true);
+        const QByteArray out = sampleRate == outRate
+            ? pcm : resampleLinearLe(pcm, sampleRate, outRate);
+
+        if (!m_board || m_boardPlay == BoardPlay::Playing) {
+            enqueueBleAudio(out);
+        } else {
+            // 开发板还没确认进入播放态：现在发过去会被固件直接丢弃。先扣住，
+            // 确认后由 confirmBoardPlay() 整体放行；确认不了则回传关闭、
+            // 这块音频由本机念出来（它同时也进了下面的 m_pendingPcm）。
+            if (m_boardPlay == BoardPlay::Idle)
+                requestBoardPlay();          // 失败时会把 m_bleAudioOut 关掉
+            if (m_bleAudioOut)
+                m_boardHeldPcm.append(out);
+        }
     }
 
     // 模型采样率与设备采样率不一致时，在这里补一次重采样。
@@ -905,8 +1095,13 @@ void MainWindow::writePendingAudio()
     // 涨过 kBacklogLowWaterBytes 后 speakNextSentence() 的闸门就会让合成暂停；
     // 蓝牙队列降到低水位（streamLowWater 信号）再恢复。这样整条流水线由
     // 蓝牙的真实排空速度驱动，回传不会溢出，也不会丢音频。
+    //
+    // 等开发板确认 play 期间同理：本机 sink 不能先走，否则它会把合成一路带下去，
+    // 而蓝牙那边一个字节都还没开始发。
     bool btGated = false;
-    if (m_bleAudioOut && m_bleBackpressured) {
+    if (m_bleAudioOut && m_boardPlay == BoardPlay::Requested) {
+        btGated = true;
+    } else if (m_bleAudioOut && m_bleBackpressured) {
         if (m_deviceHandler->streamQueuedBytes() <= m_deviceHandler->streamLowWaterBytes())
             setBleBackpressured(false);    // 兜底：信号丢失时靠定时器自行恢复
         else
@@ -928,7 +1123,8 @@ void MainWindow::writePendingAudio()
 
     // 设备无响应检测：有积压却连续几秒一个字节都写不进去。见
     // kStalledTicksBeforeGivingUp 的说明——这是背压闸门引入的失败模式。
-    // 被蓝牙背压主动暂停的写入不算设备无响应（蓝牙真卡死由 streamAborted 兜底）。
+    // 被蓝牙背压或等待 play 确认主动暂停的写入不算设备无响应
+    // （蓝牙真卡死由 streamAborted 兜底，play 等不到由 m_boardPlayTimer 兜底）。
     if (m_speaking && !m_pendingPcm.isEmpty() && writtenTotal == 0 && !btGated) {
         if (++m_stalledTicks >= kStalledTicksBeforeGivingUp) {
             m_stalledTicks = 0;
@@ -974,6 +1170,11 @@ void MainWindow::maybeFinishSpeaking()
     // 这只影响自然结束；用户主动停止走 stopSpeaking()，已先清空队列，立即生效。
     if (m_bleAudioOut && m_deviceHandler->streamQueuedBytes() > 0)
         return;
+    // 还在等开发板确认 play、或有扣住未放行的音频：同样没有念完
+    if (m_bleAudioOut
+            && (m_boardPlay == BoardPlay::Requested || !m_boardHeldPcm.isEmpty())) {
+        return;
+    }
 
     setSpeaking(false);
 }
@@ -1013,11 +1214,32 @@ void MainWindow::speakReply(const QString &reply)
     }
 
     // 规格步骤 5/6：逐句合成。切句是纯函数，已由 tests/ 单独验证。
-    m_speakQueue = splitSentences(reply);
+    const QStringList sentences = splitSentences(reply);
+    if (sentences.isEmpty())
+        return;
+
+    if (m_speaking) {
+        // 上一条回复还没念完：新回复**排在它后面**，念完旧的接着念新的。
+        //
+        // 不能像空闲时那样直接换掉队列、把在途计数清零——合成器里旧句子还在跑，
+        // 它的 sentenceFinished 会被记到新回复头上，计数就此错位：朗读可能提前
+        // 被判定为结束（回传时会提前给开发板发 stop，截掉尾音），旧回复则被拦腰
+        // 截断。上行音频每 3 秒就可能触发一次问答，这种重叠很容易发生。
+        //
+        // 顺手丢掉已经喂出去的前缀，队列不会随着一条条回复无限变长。
+        m_speakQueue.remove(0, m_speakIndex);
+        m_speakIndex = 0;
+        m_speakQueue.append(sentences);
+        // 有句子在合成时，它的 sentenceFinished 自会取走下一句。只有恰好停在
+        // 「全部喂完、只等音频排空」的收尾阶段，才需要在这里推一把。
+        if (m_sentencesOutstanding == 0)
+            speakNextSentence();
+        return;
+    }
+
+    m_speakQueue = sentences;
     m_speakIndex = 0;
     m_sentencesOutstanding = 0;
-    if (m_speakQueue.isEmpty())
-        return;
 
     setSpeaking(true);
     speakNextSentence();
@@ -1076,6 +1298,7 @@ void MainWindow::stopSpeaking()
     stopPlayback();
     // 回传的音频必须跟着一起停：否则「停止」之后眼镜还会把已排队的几秒播完
     m_deviceHandler->clearStreamQueue();
+    boardStopIfNeeded();             // 含「已发 play、还在等确认」的情况
     setBleBackpressured(false);
     setSpeaking(false);
 }

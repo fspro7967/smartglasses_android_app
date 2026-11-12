@@ -8,11 +8,12 @@
 #include <QLowEnergyService>
 #include <QBluetoothUuid>
 #include <QMap>
+#include <QSet>
 #include <QElapsedTimer>
 
 class QTimer;
 
-// 开发板（ESP32-C3 蓝牙音频收发器，见 smartglasses_board/src/main.cpp）的协议常量。
+// 开发板（ESP32-C3 蓝牙音频收发器，固件见 firmware/esp32c3/src/main.cpp）的协议常量。
 // 开发板与手机各用一条特征：控制特征收发文本指令，音频特征上行麦克风 PCM，
 // 播放特征下行扬声器 PCM。均为单声道 int16 小端；上行固定 16 kHz，下行采样率
 // 由控制指令 rate:N 指定（见 kCmdRatePrefix），板子线性插值到 I2S 的 16 kHz。
@@ -34,6 +35,11 @@ inline constexpr const char *kCmdPlay  = "play";
 inline constexpr const char *kCmdStop  = "stop";
 // 下行采样率指令前缀，完整指令为 "rate:8000"。必须在 play 之前发（播放中固件会拒绝）。
 inline constexpr const char *kCmdRatePrefix = "rate:";
+// 固件对每条指令都会在控制特征上 notify 一条文本回执：成功以 "OK:" 开头，
+// 失败以 "ERROR:" 开头。"play" 的成功回执是 kReplyPlaying——手机收到它才算
+// 板子真的进入了播放态（见 MainWindow::requestBoardPlay）。
+inline constexpr const char *kReplyPlaying     = "OK:playing";
+inline constexpr const char *kReplyErrorPrefix = "ERROR:";
 } // namespace BoardProtocol
 
 class DeviceHandler : public QObject
@@ -48,8 +54,11 @@ public:
     void connectToDevice(const QBluetoothDeviceInfo &device);
     void disconnectDevice();
 
-    // 启用指定特征的通知/指示
-    void enableCharacteristicNotification(const QString &serviceUuid,
+    // 启用/关闭指定特征的通知，并把它设为「当前激活」的上行数据来源
+    // （同一时刻只有一条激活特征，其数据经 dataReceived 送出）。
+    // 返回 false 表示根本没发出去：服务不存在、特征尚未发现或没有 CCCD 描述符。
+    // 返回 true 只代表开关已写出；写入本身若失败，会经 statusChanged 另行上报。
+    bool enableCharacteristicNotification(const QString &serviceUuid,
                                           const QString &charUuid,
                                           bool enable = true);
 
@@ -59,20 +68,31 @@ public:
 
     // 是否已发现指定 UUID 的服务。用于识别开发板并自动配置收发特征。
     bool servicePresent(const QString &uuid) const;
+    // 指定服务下的特征是否已发现且有效。服务详情发现失败时服务对象仍在，
+    // 但特征全是无效的——自动配置必须逐个核实，不能只看服务在不在。
+    bool characteristicPresent(const QString &serviceUuid, const QString &charUuid) const;
 
-    // 向「控制特征」写入一条短指令（开发板的 play/stop/volume/status 等）。
-    // 与 setWriteTarget 的下行队列相互独立：控制特征与音频播放特征不是同一条，
-    // 指令也不该和音频分片混在一个队列里排队。指令很短且少，这里直接写入，
-    // 不做分片、不做节拍控制。
-    // 返回 false 表示服务/特征不存在或不可写。
-    bool writeControlValue(const QString &serviceUuid,
-                           const QString &charUuid,
-                           const QByteArray &data);
+    // ---- 控制通道（开发板的 play/stop/rate 等文本指令与回执）----
+    //
+    // 控制通道与下行队列（setWriteTarget / writeData / enqueueStreamData）是两条
+    // 独立的路：指令很短且少，不分片、不走节拍；它的成败也单独记账、单独上报，
+    // 绝不牵连音频队列（控制特征与播放特征同属一个服务，Qt 的错误回调又不带特征，
+    // 所以归属靠 m_inflightWrites 的提交顺序判定，见 onServiceError）。
+    //
+    // setControlChannel() 绑定控制特征并开启它的通知：固件的回执只走 notify，
+    // 收不到回执就无从确认指令是否生效，所以「可写 + 可通知 + 有 CCCD」缺一不可，
+    // 否则返回 false。与上面的「激活特征」互不影响，两路通知可以同时开着。
+    bool setControlChannel(const QString &serviceUuid, const QString &charUuid);
+    void clearControlChannel();
+    // 写入一条指令。返回 false 表示控制通道未建立或指令为空（什么都没发）。
+    // 返回 true 只代表已提交；最终失败经 controlWriteFailed() 上报，
+    // 固件的回执经 controlReply() 上报。
+    bool writeControlValue(const QByteArray &data);
 
     // 设置流式回传音频的字节率（字节/秒 = 采样率 × 2）。默认 8 kHz（16000 字节/秒）。
-    // 仅无响应写入(WriteWithoutResponse)的定时器节拍用它；有响应写入
-    // (WriteWithResponse，开发板播放特征即此类) 由每包 ACK 往返天然限速，
-    // 节拍器不参与，此时本值只用于换算流式队列的积压上限（见 enqueueStreamData）。
+    // 无响应写入(WriteWithoutResponse，开发板播放特征即此类)的定时器节拍用它；
+    // 只支持有响应写入(WriteWithResponse)的特征由每包 ACK 往返天然限速，
+    // 节拍器不参与，此时本值只用于换算流式队列的积压上限与水位（见 enqueueStreamData）。
     void setStreamByteRate(int bytesPerSecond);
     // 向写入目标发送数据；超长内容按当前 MTU 自动分包发送。
     // 发送结果通过 writeFinished / writeError 信号异步返回。
@@ -117,6 +137,10 @@ signals:
                                   int properties);                // 每发现一个特征发出
     void serviceDetailsDiscoveryFinished();                       // 所有服务的详情发现完毕
 
+    // 控制通道信号
+    void controlReply(const QByteArray &value);                   // 控制特征的 notify 回执（原始字节）
+    void controlWriteFailed(const QString &reason);               // 一条控制指令写入失败
+
     // 下行写入信号
     void writeFinished();                                         // 整条数据发送完成
     void writeError(const QString &error);                        // 写入失败
@@ -152,6 +176,27 @@ private:
         bool oneShot = false;
     };
 
+    // 一次已交给 Qt、尚未收到完成/错误回调的写入属于哪条路。
+    enum class WriteKind { None, Control, OneShot, Stream };
+    struct InflightWrite {
+        WriteKind kind = WriteKind::None;
+        QLowEnergyService *service = nullptr;
+    };
+    enum class InflightFilter { Any, ControlOnly, DataOnly };
+
+    // 在途写入记账（只用于错误归属与销账，不参与流控）。
+    // QLowEnergyService::errorOccurred 只给错误码，不说是哪条特征；而 Qt Android
+    // 把同一连接上的读写串行执行，回调顺序即提交顺序——所以「该服务上最早那条
+    // 还没回调的写入」就是出错的那条。
+    void noteInflight(WriteKind kind, QLowEnergyService *service);
+    WriteKind takeInflight(QLowEnergyService *service, InflightFilter filter);
+    void dropInflight(InflightFilter filter);
+
+    // 连接级状态的统一复位：主动断开与意外断开走同一段，避免两处各清一半。
+    void resetConnectionState();
+    // 服务详情发现收尾（全部完成，或超时后带着已发现的部分继续）
+    void finishDetailsDiscovery(bool timedOut);
+
     // 根据服务UUID查找对应的QLowEnergyService对象
     QLowEnergyService* findService(const QString &uuid) const;
     // 分包大小：由协商后的 ATT MTU 决定（MTU - 3 字节 ATT 头），未知时按默认 23 处理
@@ -174,11 +219,17 @@ private:
     QLowEnergyController *m_controller = nullptr;
     QList<QLowEnergyService*> m_services;     // 所有已创建的服务对象
     bool m_servicesDiscovered = false;        // 是否已完成服务发现（控制器级别）
-    int m_pendingServiceDetails = 0;          // 正在等待 detail 发现的服务数量
+    QSet<QLowEnergyService*> m_detailsPending; // 详情发现尚未有结果的服务
+    QTimer *m_detailsTimer = nullptr;         // 详情发现的总超时（某个服务卡住时兜底）
 
     // 当前激活的特征（用于数据接收）
     QLowEnergyService *m_activeService = nullptr;
     QLowEnergyCharacteristic m_activeCharacteristic;
+
+    // 控制通道（见 setControlChannel）
+    QLowEnergyService *m_controlService = nullptr;
+    QLowEnergyCharacteristic m_controlCharacteristic;
+    QList<InflightWrite> m_inflightWrites;     // 在途写入，按提交顺序
 
     // 写入目标（AI 回复等下行数据）
     QLowEnergyService *m_writeService = nullptr;
