@@ -20,6 +20,12 @@
 //   7. 下行采样率可配置（控制指令 rate:N）：手机侧 Qt Android 把每次写入串行化，
 //      实测只能持续约 24 KB/s，低于 16 kHz int16 所需的 32 KB/s。让手机直接发 TTS
 //      原生 8 kHz（16 KB/s），由板子线性插值到 I2S 的 16 kHz，带宽需求减半。
+//   8. 断开连接时复位播放态与播放缓冲（见 ServerCallbacks::onDisconnect）。
+//   9. 上行 DC Blocker 的输出做饱和限幅，不再整数回绕（见 applyDcBlocker）。
+//
+// 控制指令的回执是协议的一部分：每条指令都以 notify 回一条文本，成功以 "OK:"
+// 开头、失败以 "ERROR:" 开头。APP 靠 "OK:playing" 确认板子进入了播放态之后才开始
+// 发音频（MainWindow::requestBoardPlay），改回执文本时必须同步改 BoardProtocol。
 //
 // 引脚（按实机接线确认）：
 //   INMP441 : SCK→GPIO0  WS→GPIO2  SD→GPIO1  L/R→GND  VDD→3.3V
@@ -216,14 +222,22 @@ int readRawAudio(int16_t *samples, int count) {
 }
 
 // ===== 一阶 DC Blocker（去掉 INMP441 的直流偏置）=====
+// y[n] = x[n] - x[n-1] + R·y[n-1]
+//
+// 输出必须饱和到 int16 再写回：相邻样本差最大可达 ±65535，叠上滤波器记忆后 y 会
+// 超出 int16。直接截断会回绕——一个正向大信号瞬间变成满幅负值，听起来是一声
+// 爆音，手机端的识别也会被这种脉冲带偏。滤波器状态本身保留未饱和的值，只对
+// 输出做限幅，否则限幅会改变滤波器的后续响应。
+// 乘法用 64 位：状态接近 ±65535 时 state × R 已经贴着 int32 的上限。
 void applyDcBlocker(int16_t *samples, int count) {
     static int16_t prevSample = 0;
     static int32_t filteredState = 0;
     const int32_t R = 32580;   // ≈ 0.994 × 32768，高通约 15 Hz @16k
     for (int i = 0; i < count; i++) {
         const int32_t in  = samples[i];
-        const int32_t out = in - prevSample + ((filteredState * R) >> 15);
-        samples[i] = (int16_t)out;
+        const int32_t out = in - prevSample
+                            + (int32_t)(((int64_t)filteredState * R) >> 15);
+        samples[i] = (int16_t)constrain(out, (int32_t)INT16_MIN, (int32_t)INT16_MAX);
         filteredState = out;
         prevSample = in;
     }
@@ -429,7 +443,13 @@ class ServerCallbacks : public BLEServerCallbacks {
     void onDisconnect(BLEServer *server) {
         deviceConnected = false;
         audioAccumCount = 0;
-        Serial.println("[提示] 手机已断开，重新广播");
+        // 播放会话随连接结束。手机若在播放途中断开（走远、被杀），stop 指令不会
+        // 送达：不在这里复位的话，固件会一直停在播放态，下次连接时拒绝 rate 指令
+        // （只允许在 stopped 时切换），缓冲里的残留音频也会在新会话开头被放出来。
+        // 本回调与控制/播放回调同在 BLE 任务里执行，可以直接动这些状态。
+        isPlaying = false;
+        resetPlaybackBuffer();
+        Serial.println("[提示] 手机已断开，播放已复位，重新广播");
         BLEDevice::startAdvertising();
     }
 };
