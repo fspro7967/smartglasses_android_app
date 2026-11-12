@@ -5,7 +5,7 @@ An APP that can receive bluetooth audio from a specific device and transcribe it
 ### With Qt Creator
 The APP is written with Qt in C++, so you need to install Qt Creator(Recommended) and Android SDK to build the project, the version required are as settings.json file. The detailed introduction can be easily reached on the Internet.
 
-    Tips: When build in the release mode, use your own release keystore as the signature file. The keystore path, store/key passwords and alias are configured in `settings.json` (see `.vscode/settings.example.json`); they are intentionally kept out of version control.
+    Tips: Release builds are signed with a keystore; its path, store/key passwords and alias are configured in `.vscode/settings.json`. The `android_release.keystore` and the `.vscode/settings.json` committed in this repository are a test/demo signing key that is public on purpose: fine for trying the app, never for publishing it (see `docs/adr/0001-committed-test-signing-key.md`). For a real release, generate your own keystore and keep it and its passwords out of version control; `.vscode/settings.example.json` is the template.
 
 ### With Visual Studio Code
 Yes, I know many developers like coding in VSCode, but it's a pity that we can not completly say goodbye to Qt Creator and Android SDK. 

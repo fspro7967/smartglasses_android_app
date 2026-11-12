@@ -122,9 +122,14 @@ captures/
 *.dex
 *.class
 
-# Secrets and credentials - NEVER commit these
-# android_release.keystore is intentionally excluded; keep your own backup.
+# Secrets and credentials - NEVER commit your own
+#
+# 唯一的例外是仓库里跟踪着的 android_release.keystore：它是一把**有意公开的
+# 测试/演示签名密钥**（决策见 docs/adr/0001-committed-test-signing-key.md），
+# 下面单独放行，让这份忽略规则与仓库事实一致。除它之外的任何 keystore——
+# 尤其是用于正式发布的——都不要提交。
 *.keystore
+!/android_release.keystore
 *.jks
 *.p12
 *.pem
@@ -144,9 +149,11 @@ venv/
 # IDE
 .idea/
 *.iml
-# .vscode/settings.json 内含 release keystore 的 STORE_PASS/KEY_PASS 口令。
-# 仓库里提交的是脱敏模板 .vscode/settings.example.json。
-.vscode/settings.json
+# 注意：.vscode/settings.json **是被跟踪的**，这里不忽略它。里面是上面那把测试
+# 密钥的口令和一份本机路径示例（同见 ADR 0001）。换成自己的正式密钥时，别把口令
+# 提交回来——从脱敏模板 .vscode/settings.example.json 起步，并在本地执行
+#   git update-index --skip-worktree .vscode/settings.json
+# 让之后的改动不进入提交。
 
 # OS junk
 Desktop.ini
