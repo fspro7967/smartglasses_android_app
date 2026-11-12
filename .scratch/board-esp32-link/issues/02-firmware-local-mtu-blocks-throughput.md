@@ -1,6 +1,6 @@
 # 02 — 固件未切换 MTU + 播放特征只支持有响应写,下行带宽不成立
 
-Status: ready-for-human
+Status: resolved
 Type: task
 
 这条是**阻塞项**:在修好之前,开发板的语音回传必定在几秒内自行中止。
@@ -87,3 +87,22 @@ pPlaybackChar = pService->createCharacteristic(
 - 本仓库不需要为此改动,除了把结论回填进 `issues/05`。
 - 这条也回答了 `.scratch/ble-audio-out/issues/04` 的「实际吞吐」问题:
   对开发板而言,协商 MTU 由固件决定,预期是 500 左右;当前是 23。
+
+## Answer
+
+**2026-11-11 — 固件已入库并包含本工单的 A、B 两项修法;真机数字仍待 `issues/05` 回填。**
+
+固件现在在本仓库的 `firmware/esp32c3/src/main.cpp`(提交 `d36d8dc`),不再是正文所说的
+外部仓库 `../../smartglasses_board`。对照「修法」:
+
+- **A**:`setup()` 里 `BLEDevice::setMTU(BLE_PREFERRED_MTU)`(517);连接后
+  `updateConnParams(…, 6, 12, 0, 200)` 请求 7.5–15 ms 连接间隔。
+- **B**:播放特征带 `PROPERTY_WRITE_NR`,手机侧因此走无响应写。
+- 播放环形缓冲从 512 提到 4096 样本(256 ms)。
+- 另外带宽需求本身也减半了:手机直接发 TTS 原生的 8 kHz(16 KB/s),固件按 `rate:N`
+  指令线性插值到 16 kHz。所以正文表格里「32,000 B/s」这一行对现状已不成立。
+  决策见 `docs/adr/0003-downlink-native-rate-board-upsamples.md`。
+
+完成判据第 1 条(固件加入 MTU 设置)已满足——两个固件环境在本机 `pio run` 编译通过;
+是否已烧录、以及第 2–4 条(chunkSize ≥ 500、30 秒不溢出、听感)只能在真机上判,
+它们本来就在 `issues/05` 的判据里,不在这里重复挂着。

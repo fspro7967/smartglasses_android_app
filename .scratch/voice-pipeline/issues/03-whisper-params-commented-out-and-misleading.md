@@ -1,11 +1,12 @@
-# 03 — 未提交的 whisper 参数改动:只有 suppress_nst 真的变了,方向与注释相反
+# 03 — 被「暂时」注释掉的 whisper 解码参数:只有 suppress_nst 真的变了,方向与注释相反
 
 Status: needs-triage
 Type: task
 
 ## 现状
 
-工作区未提交的 diff 把 `src/whisper_manager.cpp:121-129` 的六行参数注释掉了:
+提交 `21683c3`(`chore(whisper): 暂时注释解码参数抑制`)把 `WhisperManager::processBuffer()`
+里的六行参数注释掉了:
 
 ```cpp
 //排除空白token
@@ -62,3 +63,11 @@ params.audio_ctx = 278 ;
 - 语言不对称(刻意写死 `en`)的说明在同文件 `:108-117`,那是**另一件事**,
   已在 `.scratch/offline-tts/spec.md` 步骤 9 冻结,不要一起动。
 - 采集侧问题:`.scratch/voice-pipeline/issues/01`、`issues/02`
+
+## Comments
+
+**2026-11-11** — 标题与正文里的「未提交」已过期:这处改动已作为 `21683c3`
+(`chore(whisper): 暂时注释解码参数抑制`)提交,判据 3「工作区不再残留未提交的参数改动」
+因此满足。提交说明里的「暂时」说明它是有意的临时状态,但**为什么**、**何时恢复**仍然
+没有写在任何地方,判据 1、2 没变。「需要所有者回答的」三个问题原样保留,状态维持
+`needs-triage`。文件已相应改名(原名 `03-whisper-params-uncommitted-and-misleading.md`)。

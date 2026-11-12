@@ -1,6 +1,6 @@
 # 05 — Whisper 初始化仍在构造函数里同步跑,首屏被 57 MB 模型解析挡住
 
-Status: ready-for-agent
+Status: resolved
 Type: task
 
 ## 现状
@@ -52,3 +52,18 @@ whisper 没有。规格的「已知风险」表里也记了这一条:
 
 - 对标实现:`src/mainwindow.cpp:688-724`(`prepareTtsModel`)
 - 接口纪律说明:`includes/speechsynthesizer.h:19-29`
+
+## Answer
+
+**2026-11-11 — 已按「建议做法」1–4 改完(代码在工作区,未经真机验证)。**
+
+- 加载挪进 `WhisperManager::initAsync()`(`QtConcurrent::run`),构造函数里只接线;
+  结果经 `ready()` / `initFailed()` 投递回 GUI 线程。封装在 `WhisperManager` 内部而不是
+  像 TTS 那样放在 `MainWindow`,因为它不需要先提取资产,只有「读入 + 解析」一步。
+- 新增 `MainWindow::whisperReady` 属性(`whisperReadyChanged`)。未就绪时:
+  `onDataReceived()` 丢弃上行音频并只提示**一次**「语音识别模型尚未就绪」(上行每秒上百包,
+  不能逐包提示);`processAudioFile()` 直接拒绝;QML 的「选音频」按钮置灰。
+- `WhisperManager` 析构时等待加载与转写两个后台任务结束再 `whisper_free`。
+
+验证:Android Release 目标编译链接通过(含 QML 缓存编译)。三条完成判据都要在真机上看,
+转入 `issues/11`。

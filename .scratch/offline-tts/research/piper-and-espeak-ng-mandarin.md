@@ -2,7 +2,7 @@
 
 **Target under evaluation:** Qt 6.11.1 / C++17 / CMake Android app, arm64-v8a, Android 9+ (API 28), zero Java/JNI. Requirements under consideration: offline Mandarin TTS, accurate pronunciation, small model, low latency.
 
-**Companion artifacts (same research effort, same workspace):** deep-dive notes on the C++ embedding surface / Android state live in `.scratch/piper-embedding-research.md`, and on the eSpeak-NG Mandarin front-end in `.scratch/research/espeak-ng-mandarin-primary-sources.md`. This file is the consolidated report for Topics A–C.
+**Companion artifacts (same research effort, same workspace):** deep-dive notes on the C++ embedding surface / Android state live in `piper-embedding-research.md`, and on the eSpeak-NG Mandarin front-end in `espeak-ng-mandarin-primary-sources.md`. This file is the consolidated report for Topics A–C.
 
 **Method / environment caveats (read first — they affect reproducibility)**
 

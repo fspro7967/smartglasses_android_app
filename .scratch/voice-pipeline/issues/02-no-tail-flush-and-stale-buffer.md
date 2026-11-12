@@ -1,6 +1,6 @@
 # 02 — 尾部音频永不转写;断开时缓冲不清,跨会话残留
 
-Status: ready-for-agent
+Status: resolved
 Type: bug
 
 ## 问题
@@ -49,3 +49,24 @@ if (m_audioBuffer.size() >= CHUNK_SIZE_BYTES && m_whisperManager) {
 
 - 上游丢音频:`.scratch/voice-pipeline/issues/01`
 - 设备端每包 64 样本(128 B)、约 250 包/秒:`smartglasses_board/src/main.cpp:18,466-485`
+
+## Answer
+
+**2026-11-11 — 「建议做法」1–3 已改完(代码在工作区,未经真机验证);第 4 点(静音检测)没有做。**
+
+- **冲刷定时器**:`MainWindow::m_tailFlushTimer`,单次、600 ms(`kTailFlushMs`),
+  每收到一包上行数据就重启;超时调用 `WhisperManager::flush()`,把不足 3 秒的尾巴送去
+  转写,短于 0.5 秒(`kMinFlushSamples`)的直接丢弃。两个成段条件各自的注释都指向对方。
+- **断开/切换清缓冲**:新增 `MainWindow::resetAudioInput()`,在 `connected`、`disconnected`、
+  `connectToDevice()`、`disconnectDevice()` 四处调用。`WhisperManager::reset()` 现在有真实
+  调用方,并且多做了一件事:自增 `m_epoch`,让**正在转写**的那一段的结果也作废,
+  不会在断开之后又冒出一条属于上一段会话的回复。
+
+**一个必须说清楚的限制:**冲刷靠的是「一段时间没有新数据」。仓库里的开发板固件在连接
+期间**持续上行**(静音也照发,见 `firmware/esp32c3/src/main.cpp` 的 `loop()`),所以接着
+开发板时这个定时器基本不会触发——短指令仍然是等后续的静音把 3 秒窗口填满才被识别
+(延迟上限 3 秒,不再是「永远不识别」,但也达不到判据 1 的「松口后 1 秒内」)。
+它对「说完就停止上行」的设备才立竿见影。要在持续上行的设备上做到跟手,需要按能量/
+语音活动切段,即本工单问题 4,它和 `issues/04` 方向 2 是同一件事,留在那边决定。
+
+完成判据:第 2、3 条已满足(代码层面);第 1 条受上述限制,连同真机确认一起转入 `issues/11`。

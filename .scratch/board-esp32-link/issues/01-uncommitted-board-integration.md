@@ -1,6 +1,6 @@
 # 01 — 开发板适配改动未提交、无规格、无工单,需要决定走向
 
-Status: needs-triage
+Status: resolved
 Type: task
 
 ## 现状
@@ -45,3 +45,21 @@ Type: task
 
 - 阻塞项:`.scratch/board-esp32-link/issues/02`(固件 MTU,带宽不成立)
 - 同批发现:`issues/03`、`issues/04`、`issues/05`
+
+## Answer
+
+**2026-11-11 — 走向已由后续提交事实上定了:保留,并且固件一并入库。**
+
+- 开发板适配作为 `3e22897`(`feat(ble): 适配 ESP32 开发板音频收发`)提交,随后
+  `92749a5` 补了回传背压与在途流控,`d36d8dc` 把固件收进本仓库(`firmware/esp32c3/`)。
+  「未提交、会被 checkout 弄丢」这件事不再成立。
+- 夹带的 whisper 参数改动已单独提交(`21683c3`),遗留问题在
+  `.scratch/voice-pipeline/issues/03`。
+- 「回传目标不再假定是眼镜」这条前提变化,现在记在 `spec.md` 顶部的状态更新和
+  `docs/adr/0003-downlink-native-rate-board-upsamples.md` 里。
+- 问题 3(自动识别是否符合预期):保留自动识别,并在 `issues/03` 里把它改成了
+  「逐项核实才算识别成功,失败则退化为手工选特征」。
+- 问题 4(音量 / status / echo 要不要用)**没有回答**。`play` 的回执现在用上了
+  (`issues/04`),其余三条指令仍未使用,拆成 `issues/08` 单独等所有者决定。
+
+本工单关闭;`spec.md` 仍是盘点性质的记录,没有升格为冻结规格。

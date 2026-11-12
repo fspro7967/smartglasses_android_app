@@ -1,6 +1,6 @@
 # 08 — 提取清单只校验落盘副本自身:APK 换了模型也不会重新提取
 
-Status: ready-for-agent
+Status: resolved
 Type: bug
 
 ## 问题
@@ -61,3 +61,24 @@ Type: bug
 - 实现:`src/assetextractor.cpp`、`includes/assetextractor.h`
 - 调用方:`src/mainwindow.cpp:688-724`
 - 既有真机判据:`.scratch/offline-tts/issues/02`
+
+## Answer
+
+**2026-11-11 — 按「建议做法」1 + 2 一起实现,并补了单元测试。**
+
+- 清单升到 v2:首行是 `#extract-manifest-v2\t<应用版本>`,之后仍是「文件名\t字节数」。
+- `isExtracted(assetDir, targetDir, fileNames)` 多了 `assetDir` 参数,判定变成
+  **「落盘文件确实来自当前这份 APK」**:清单格式与应用版本一致、文件集合一致,且每个文件的
+  落盘长度 = 清单记录 = **源资产长度**(`QFileInfo("assets:/…").size()`,Qt 的 Android
+  资产文件引擎支持,已对照本机 Qt 源码确认)。
+- 应用版本取 `QCoreApplication::applicationVersion()`,Android 上默认就是 APK 的 `versionName`。
+  它兜住「新旧模型长度恰好相同」的情况。**注意它的边界**:版本号不变、长度也不变的换模型
+  (典型是开发期反复装同一版本号的包)仍然看不出来;要覆盖这一条得上 sha256(做法 3),没有做。
+- 旧格式清单:首行对不上标记 → 判为未提取 → 重新提取一次并写出 v2,不会反复重试。
+
+验证:新增 `tests/tst_assetextractor.cpp`(11 个测试函数,把普通临时目录当作 assets 目录),
+覆盖源长度变化、版本变化、旧格式清单、清单缺失/损坏、落盘文件被截断、源文件缺失,
+在本机 host Qt 上全部通过。
+
+完成判据:第 2、3 条由单元测试覆盖;第 1 条(真的造一个换了模型的 APK 覆盖安装)需要真机,
+并入 `issues/02` 的验收。

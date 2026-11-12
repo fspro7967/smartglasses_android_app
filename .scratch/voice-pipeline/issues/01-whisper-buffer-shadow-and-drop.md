@@ -1,6 +1,6 @@
 # 01 — 音频缓冲被局部变量遮蔽;转写进行中到达的音频被整块丢弃
 
-Status: ready-for-agent
+Status: resolved
 Type: bug
 
 ## 问题一:局部变量遮蔽了成员
@@ -72,3 +72,28 @@ worker 线程写(`src/whisper_manager.cpp:141,167`),GUI 线程读(:71),
 
 - 调用方:`src/mainwindow.cpp:584-599`
 - 同批发现:`.scratch/voice-pipeline/issues/02`(尾部音频永不转写)
+
+## Answer
+
+**2026-11-11 — 已按「建议做法」1–4 全部改完(代码在工作区,未经真机验证)。**
+
+成段与排队整体收进了 `WhisperManager`,调用方不再自己凑 3 秒:
+
+- **遮蔽**:局部变量删除。`feedAudioData(const QByteArray &)` 把样本追加到成员
+  `m_window`,凑满 `kWindowSamples`(3 秒)就切成一段。「凑满才转写」现在是真的语义,
+  `MainWindow` 里原来那份 `m_audioBuffer` + `CHUNK_SIZE_BYTES` 已删除。
+- **忙时不再丢**:成段后进入有界队列 `m_pending`(`kMaxPendingSegments = 4`,约 12 秒)。
+  同一时刻只跑一次 `whisper_full`,上一段跑完由 `segmentFinished` 信号取下一段。
+  队列满时丢**最早**的一段(保住最新说的话),并经 `errorOccurred` 报
+  「识别速度跟不上,已丢弃最早的 N 秒音频」。
+- **同步**:原来跨线程读写的 `m_isProcessing` 换成 `m_busy`,只在对象线程读写;
+  worker 不再碰它,而是发 `segmentFinished`(排队连接)回到对象线程推进。
+  跨线程的只剩原子量 `m_ready` / `m_epoch`。线程模型写在 `includes/whisper_manager.h` 类注释里。
+- **顺带**:喂入进度不再走 `errorOccurred`(以前状态栏会显示「Whisper 错误: 已接收…」),
+  改为单独的 `segmentQueued` 信号;奇数字节的分片由 `m_carryByte` 接到下一次,不再错位。
+
+验证:Android Release 目标(arm64-v8a)编译链接通过、零警告。这部分依赖 whisper,
+没有单元测试。
+
+完成判据:第 2、3 条已满足;第 1 条(连续说 3 段都有结果)只能在真机上判,
+已转入 `issues/11`。

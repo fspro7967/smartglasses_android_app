@@ -1,6 +1,6 @@
 # 01 — 签名密钥与口令被跟踪进仓库(README 说它们不在版本控制里)
 
-Status: ready-for-human
+Status: resolved
 Type: bug
 
 ## 事实
@@ -59,3 +59,18 @@ android_release.keystore
 
 - 交接文档原文:`.scratch/offline-tts/handoff.md` 第 5.1 节
 - 另一条「只在 fresh clone 暴露」的构建问题:`issues/02`
+
+## Answer
+
+**2026-11-11 — 所有者选了方向 3:接受现状,认定这是一把测试/演示密钥。** 不轮换、不重写历史。
+
+- 决策留档:`docs/adr/0001-committed-test-signing-key.md`。
+- `README.md` 第 8 行改成与事实一致的说法:仓库里的 `android_release.keystore` 与
+  `.vscode/settings.json` 是有意公开的测试/演示签名密钥,可以用来试用,不能用来发布;
+  正式发布要自己生成 keystore 并留在版本库之外。
+- `.gitignore`:`*.keystore` 之后加了 `!/android_release.keystore`,并删掉了对
+  `.vscode/settings.json` 的忽略规则(它对已跟踪的文件本来就不起作用),两处注释都改成
+  说明「这两个文件是被跟踪的,为什么」。
+
+三条完成判据均满足。提醒一句与决策配套的约束(已写进 ADR):**这把密钥签出来的包不具备
+任何来源保证**,不要把它用于对外分发的版本。

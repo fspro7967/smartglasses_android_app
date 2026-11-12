@@ -55,3 +55,14 @@ Type: task
 
 - 既有测试与运行方式:`tests/CMakeLists.txt`、`.scratch/offline-tts/issues/06`
 - 被算错的参数:`src/devicehandler.cpp:342-358`
+
+## Comments
+
+**2026-11-11** — 「建议做法」第 1 条已顺带完成:新增 `tests/tst_assetextractor.cpp`(11 个测试函数)
+和 `tests/tst_wavpcm.cpp`(新模块 `wavpcm`,13 个测试函数、按数据行展开 18 项),`tests/CMakeLists.txt` 里用
+`add_unit_test()` 统一登记。现在共 3 组测试,运行方式见 `docs/architecture.md`。
+判据 1 的前半句因此满足;第 2–5 条(重采样与分包算术抽成可测的纯函数、`file(GLOB)` 换显式
+列表、CI)都还没做,仍等所有者决定做到哪一步,状态维持 `needs-triage`。
+
+注意一个与 `file(GLOB)` 直接相关的现象:本次新增了 `src/wavpcm.cpp`,已有的构建目录必须
+重新 configure 一次它才会进构建。

@@ -1,6 +1,6 @@
 # 03 — 开发板自动配置宣告成功,但从不校验特征是否真的可用
 
-Status: ready-for-agent
+Status: resolved
 Type: bug
 
 ## 问题
@@ -80,3 +80,26 @@ if (newState == RemoteServiceDiscovered || newState == RemoteService) {
 - 发现路径:`src/devicehandler.cpp:488-565`
 - 使用方:`src/mainwindow.cpp:463-489`
 - 阻塞它的带宽问题:`issues/02`
+
+## Answer
+
+**2026-11-11 — 「期望行为」1–4 已改完(代码在工作区,未经真机验证)。**
+
+- `DeviceHandler::enableCharacteristicNotification()` 返回 `bool`,三个失败分支都返回 false。
+  新增 `characteristicPresent(serviceUuid, charUuid)`。
+- `MainWindow::configureBoard()` 逐项核实,任何一步不成就停下并说出是哪一步:
+  三个特征各自有效 → 控制通道建立(可写 + 可通知 + 有 CCCD,见 `issues/04`)→
+  音频特征通知开启 → 播放特征设为写入目标。**全部成功才置 `m_board = true`**;
+  失败时状态栏显示「发现开发板服务,但自动配置失败(<哪一步>),可在下方手动选择特征」,
+  并保持普通 BLE 设备的手工通路。
+- 通知开关本身是异步写入。写入失败(`DescriptorWriteError`)以前被当成下行写入错误处理,
+  现在单独上报到状态栏「通知开关写入失败,该特征可能收不到数据」。
+- 详情发现失败退回 `RemoteService` 的服务仍计入「已有结果」(否则会卡住收尾),但会在
+  状态栏说明「服务详情发现失败,其特征不可用」。计数从整数改成了待定服务的集合,
+  同一个服务重复通知不会重复递减。
+- **超时兜底**:`kDetailsDiscoveryTimeoutMs = 10000`。到点仍有服务没结果,就带着已发现的
+  部分发 `serviceDetailsDiscoveryFinished()` 并提示;迟到的服务补齐后会再发一次,
+  `MainWindow` 对已配置成功的开发板不重复配置。
+
+验证:Android Release 目标编译链接通过。三条完成判据都需要真机(其中第 1 条要改固件
+去掉 CCCD 才能造出来),转入 `issues/05`。

@@ -71,7 +71,7 @@
 
 
 **为什么不选其他引擎** —— 完整的十五个候选逐条淘汰与出处见
-`.scratch/offline-tts/offline-chinese-tts-comparison.md`。实施时不必重读,除非要换引擎。
+`.scratch/offline-tts/research/offline-chinese-tts-comparison.md`。实施时不必重读,除非要换引擎。
 
 ---
 
@@ -252,8 +252,8 @@ whisper_init_from_buffer_with_params(void * buffer, size_t buffer_size,
 
 | 用途 | 路径 |
 |---|---|
-| 引擎淘汰与出处的完整依据 | `.scratch/offline-tts/offline-chinese-tts-comparison.md` |
-| 附带调研材料 | `.scratch/tts-research/`、`.scratch/research/`、`.scratch/piper-embedding-research.md` |
+| 引擎淘汰与出处的完整依据 | `.scratch/offline-tts/research/offline-chinese-tts-comparison.md` |
+| 附带调研材料 | `.scratch/offline-tts/research/`(2026-11-11 起全部调研文档归拢到这里) |
 | 本次同时发现的架构问题与缺陷清单 | 见 `/improve-codebase-architecture` 报告(临时目录,未入库) |
 
 ---
